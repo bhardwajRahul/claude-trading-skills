@@ -192,6 +192,109 @@ python3 skills/finviz-screener/scripts/open_finviz_screener.py \
 
 **Why useful:** The `--url-only` flag prints the URL without opening a browser, making it suitable for scripting, logging, or embedding in other workflows.
 
+### Screening Recipes
+
+Ready-to-use filter combinations for common investment strategies. Each recipe includes iterative refinement tips.
+
+#### Recipe 1: High-Dividend Growth Stocks (Kanchi-Style)
+
+**Goal:** High yield + dividend growth + earnings growth, excluding yield traps.
+
+**Filters:** `fa_div_3to8,fa_sales5years_pos,fa_eps5years_pos,fa_divgrowth_5ypos,fa_payoutratio_u60,geo_usa`
+**View:** Financial
+
+| Filter | Purpose |
+|--------|---------|
+| `fa_div_3to8` | Yield 3-8% (caps high-yield traps) |
+| `fa_sales5years_pos` | Positive 5Y revenue growth |
+| `fa_eps5years_pos` | Positive 5Y EPS growth |
+| `fa_divgrowth_5ypos` | Positive 5Y dividend growth |
+| `fa_payoutratio_u60` | Payout ratio < 60% (sustainability) |
+| `geo_usa` | US-listed stocks |
+
+**Refinement:** Start with `fa_div_o3` → add `fa_div_3to8` to cap yield → add `fa_payoutratio_u60` to exclude traps.
+
+#### Recipe 2: Minervini Trend Template + VCP
+
+**Goal:** Stage 2 uptrend stocks with volatility contraction.
+
+**Filters:** `ta_sma50_pa,ta_sma200_pa,ta_sma200_sb50,ta_highlow52w_0to25-bhx,ta_perf_26wup,sh_avgvol_o300,cap_midover`
+**View:** Technical
+
+| Filter | Purpose |
+|--------|---------|
+| `ta_sma50_pa` | Price above 50-day SMA |
+| `ta_sma200_pa` | Price above 200-day SMA |
+| `ta_sma200_sb50` | 200 SMA below 50 SMA (uptrend) |
+| `ta_highlow52w_0to25-bhx` | Within 25% of 52W high |
+| `ta_perf_26wup` | Positive 26-week performance |
+| `sh_avgvol_o300` | Avg volume > 300K |
+| `cap_midover` | Mid cap and above |
+
+**VCP tightening:** Add `ta_volatility_wo3,ta_highlow20d_b0to5h,sh_relvol_u1` for low volatility + near 20-day high + below-average volume.
+
+#### Recipe 3: Unfairly Sold-Off Growth Stocks
+
+**Goal:** Fundamentally strong companies with recent sharp declines.
+
+**Filters:** `fa_sales5years_o5,fa_eps5years_o10,fa_roe_o15,fa_salesqoq_pos,fa_epsqoq_pos,ta_perf_13wdown,ta_highlow52w_10to30-bhx,cap_large,sh_avgvol_o200`
+**View:** Overview → switch to Valuation after reviewing candidates
+
+| Filter | Purpose |
+|--------|---------|
+| `fa_sales5years_o5` | 5Y sales growth > 5% |
+| `fa_eps5years_o10` | 5Y EPS growth > 10% |
+| `fa_roe_o15` | ROE > 15% |
+| `fa_salesqoq_pos` | Positive QoQ sales growth |
+| `fa_epsqoq_pos` | Positive QoQ EPS growth |
+| `ta_perf_13wdown` | Negative 13-week performance |
+| `ta_highlow52w_10to30-bhx` | 10-30% below 52W high |
+| `cap_large` | Large cap |
+| `sh_avgvol_o200` | Avg volume > 200K |
+
+#### Recipe 4: Turnaround Stocks
+
+**Goal:** Companies with previously declining earnings now showing recovery.
+
+**Filters:** `fa_eps5years_neg,fa_epsqoq_pos,fa_salesqoq_pos,ta_highlow52w_b30h,ta_perf_13wup,cap_smallover,sh_avgvol_o200`
+**View:** Performance
+
+| Filter | Purpose |
+|--------|---------|
+| `fa_eps5years_neg` | Negative 5Y EPS growth (prior decline) |
+| `fa_epsqoq_pos` | Positive QoQ EPS growth (recovery) |
+| `fa_salesqoq_pos` | Positive QoQ sales growth (recovery) |
+| `ta_highlow52w_b30h` | Within 30% of 52W high |
+| `ta_perf_13wup` | Positive 13-week performance |
+| `cap_smallover` | Small cap and above |
+| `sh_avgvol_o200` | Avg volume > 200K |
+
+#### Recipe 5: Momentum Trade Candidates
+
+**Goal:** Short-term momentum leaders near 52W highs with increasing volume.
+
+**Filters:** `ta_sma50_pa,ta_sma200_pa,ta_highlow52w_b0to3h,ta_perf_4wup,sh_relvol_o1.5,sh_avgvol_o1000,cap_midover`
+**View:** Technical
+
+| Filter | Purpose |
+|--------|---------|
+| `ta_sma50_pa` | Price above 50-day SMA |
+| `ta_sma200_pa` | Price above 200-day SMA |
+| `ta_highlow52w_b0to3h` | Within 3% of 52W high |
+| `ta_perf_4wup` | Positive 4-week performance |
+| `sh_relvol_o1.5` | Relative volume > 1.5x |
+| `sh_avgvol_o1000` | Avg volume > 1M |
+| `cap_midover` | Mid cap and above |
+
+#### Tips: Iterative Refinement
+
+Screening works best as a dialogue:
+
+1. **Start broad** — 3-4 core filters for an initial set
+2. **Check count** — >100 results? add filters. <5 results? relax constraints
+3. **Switch views** — `overview` first, then `financial` or `valuation` for depth
+4. **Layer technicals** — after confirming fundamentals, add `ta_` filters to time entries
+
 ---
 
 ## 6. Understanding the Output
