@@ -176,6 +176,13 @@ English README is available at [`README.md`](README.md).
   - resume-from-drafts、review-only、dry-runモードをサポート。
   - APIキー不要 — エッジスキル間のローカルYAML/JSONファイルをオーケストレーション。
 
+- **エッジシグナルアグリゲータ** (`edge-signal-aggregator`)
+  - edge-candidate-agent、edge-concept-synthesizer、theme-detector、sector-analyst、institutional-flow-tracker、edge-hint-extractor の出力を統合。
+  - 重み付け、重複排除、鮮度調整、矛盾シグナル処理を適用して、確信度順のダッシュボードを生成。
+  - `priority_score`、`support.avg_priority_score`、`themes.all`、`heat/theme_heat` など複数の上流スキーマ差分に対応。
+  - provenance（`contributing_skills`）、矛盾ログ、重複統合ログを含む JSON + Markdown レポートを出力。
+  - APIキー不要 — 上流エッジスキルのローカル JSON/YAML 出力を入力として動作。
+
 ### マーケットタイミング・底打ち検出
 
 - **マーケットトップ検出器** (`market-top-detector`)
@@ -466,6 +473,7 @@ launchctl start com.trade-analysis.skill-generation-daily
 - **エッジ候補エージェント** (`edge-candidate-agent`): APIキー不要（ローカルYAML生成、ローカルパイプラインリポジトリに対して検証）
 - **エッジ戦略レビュアー** (`edge-strategy-reviewer`): APIキー不要（ローカルYAMLドラフトの決定論的スコアリング）
 - **エッジパイプラインオーケストレータ** (`edge-pipeline-orchestrator`): APIキー不要（ローカルエッジスキルをsubprocess経由でオーケストレーション）
+- **エッジシグナルアグリゲータ** (`edge-signal-aggregator`): APIキー不要（ローカルJSON/YAML出力を統合し重み付けランキングを生成）
 
 ## 参考リンク
 - Claude Skillsローンチ概要: https://www.anthropic.com/news/skills

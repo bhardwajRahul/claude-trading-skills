@@ -68,6 +68,7 @@ testpaths = [
     "skills/data-quality-checker/scripts/tests",
     "skills/edge-strategy-reviewer/scripts/tests",
     "skills/edge-pipeline-orchestrator/scripts/tests",
+    "skills/edge-signal-aggregator/scripts/tests",
     "skills/skill-idea-miner/scripts/tests",
     "skills/skill-designer/scripts/tests",
 ]

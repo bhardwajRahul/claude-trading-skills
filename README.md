@@ -198,6 +198,13 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
   - Supports resume-from-drafts, review-only, and dry-run modes.
   - No API key required — orchestrates local YAML/JSON files across edge skills.
 
+- **Edge Signal Aggregator** (`edge-signal-aggregator`)
+  - Aggregates outputs from edge-candidate-agent, edge-concept-synthesizer, theme-detector, sector-analyst, institutional-flow-tracker, and edge-hint-extractor.
+  - Applies configurable weighting, signal deduplication, recency adjustment, and contradiction handling to produce a ranked conviction dashboard.
+  - Supports multiple upstream schema variants (for example `priority_score`, `support.avg_priority_score`, `themes.all`, `heat/theme_heat`) for robust cross-skill integration.
+  - Exports JSON + markdown reports with provenance (`contributing_skills`), contradiction logs, and deduplication logs.
+  - No API key required — operates on local JSON/YAML outputs from upstream edge skills.
+
 ### Market Timing & Bottom Detection
 
 - **Market Top Detector** (`market-top-detector`)
@@ -545,6 +552,7 @@ Several skills require API keys for data access:
 | **Edge Candidate Agent** | ❌ Not used | ❌ Not used | ❌ Not used | Local YAML generation; validates against local pipeline repo |
 | **Edge Strategy Reviewer** | ❌ Not used | ❌ Not used | ❌ Not used | Deterministic scoring on local YAML drafts |
 | **Edge Pipeline Orchestrator** | ❌ Not used | ❌ Not used | ❌ Not used | Orchestrates local edge skills via subprocess |
+| **Edge Signal Aggregator** | ❌ Not used | ❌ Not used | ❌ Not used | Aggregates local edge-skill JSON/YAML outputs into weighted ranked signals |
 | Dual-Axis Skill Reviewer | ❌ Not used | ❌ Not used | ❌ Not used | Deterministic scoring + optional LLM review |
 
 ### API Setup
