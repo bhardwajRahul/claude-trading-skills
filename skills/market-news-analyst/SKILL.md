@@ -9,6 +9,16 @@ description: This skill should be used when analyzing recent market-moving news 
 
 This skill enables comprehensive analysis of market-moving news events from the past 10 days, focusing on their impact on US equity markets and commodities. The skill automatically collects news from trusted sources using WebSearch and WebFetch tools, evaluates market impact magnitude, analyzes actual market reactions, and produces structured English reports ranked by market impact significance.
 
+## Prerequisites
+
+- **Tools:** WebSearch and WebFetch tools must be available for news collection
+- **API Keys:** None required (uses built-in web search capabilities)
+- **Knowledge:** Familiarity with financial markets terminology is helpful but not required
+
+## Output
+
+This skill produces **conversational guidance** during the analysis session. When the full workflow is executed, Claude generates a comprehensive Markdown report (see Step 6 for format) that can be saved to the `reports/` directory upon user request. No files are generated automatically; output is presented in the conversation.
+
 ## When to Use This Skill
 
 Use this skill when:
