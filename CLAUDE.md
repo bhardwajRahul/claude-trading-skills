@@ -77,6 +77,37 @@ The skill-creator will:
 3. If the skill requires API keys, add it to the API Requirements table in `README.md` and the API要件 section in `README.ja.md`
 4. If a new category is needed, create it in both files
 
+### Creating Documentation Site Pages
+
+After creating a new skill, generate documentation pages for the Jekyll site at `docs/`.
+
+**Auto-generation (recommended for most skills):**
+
+```bash
+# Generate 6-section EN page + JA stub for a specific skill
+python3 scripts/generate_skill_docs.py --skill <skill-name>
+
+# Regenerate all auto-generated pages
+python3 scripts/generate_skill_docs.py --overwrite
+```
+
+**Hand-written ★ guides (for key skills):**
+
+For skills that need detailed documentation with examples, troubleshooting, and CLI reference, create a 10-section guide manually. See `docs/README.md` for the full template and conventions.
+
+Required sections for ★ guides:
+1. Overview  2. Prerequisites  3. Quick Start  4. How It Works
+5. Usage Examples  6. Understanding the Output  7. Tips & Best Practices
+8. Combining with Other Skills  9. Troubleshooting  10. Reference
+
+**MANDATORY for both methods:**
+1. Create pages in both `docs/en/skills/` and `docs/ja/skills/` (auto-gen handles this)
+2. Verify `lang_peer` links point correctly in both directions
+3. Add the skill to `docs/en/skills/index.md` and `docs/ja/skills/index.md` guide tables
+4. Add the skill to the appropriate category in `docs/en/skill-catalog.md` and `docs/ja/skill-catalog.md`
+5. Add the skill to the API Requirements Matrix in both catalog files
+6. See `docs/README.md` for frontmatter format, badge syntax, and complete checklist
+
 ### Packaging Skills for Distribution
 
 Skills are packaged as ZIP files for Claude web app users:

@@ -13,8 +13,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -25,6 +27,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SKILLS_DIR = PROJECT_ROOT / "skills"
 DEFAULT_DOCS_DIR = PROJECT_ROOT / "docs"
 DEFAULT_CLAUDE_MD = PROJECT_ROOT / "CLAUDE.md"
+
+GITHUB_REPO_URL = "https://github.com/tradermonty/claude-trading-skills"
 
 # Existing hand-written guides; skip by default (--overwrite to regenerate).
 HAND_WRITTEN = frozenset(
@@ -247,6 +251,50 @@ def api_badges_ja(api_info: dict | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Button generation
+# ---------------------------------------------------------------------------
+
+
+def _generate_buttons(skill_name: str, skill_packages_dir: Path | None, lang: str) -> str:
+    """Return markdown download/source buttons for a skill page.
+
+    Args:
+        skill_name: The skill slug (e.g., "pead-screener").
+        skill_packages_dir: Path to the skill-packages directory, or None to skip.
+        lang: "en" or "ja".
+
+    Returns:
+        Markdown string with buttons, or empty string if skill_packages_dir is None.
+    """
+    if skill_packages_dir is None:
+        return ""
+
+    buttons = []
+    pkg_file = skill_packages_dir / f"{skill_name}.skill"
+
+    if pkg_file.exists():
+        dl_url = f"{GITHUB_REPO_URL}/raw/main/skill-packages/{skill_name}.skill"
+        if lang == "ja":
+            buttons.append(
+                f"[スキルパッケージをダウンロード (.skill)]({dl_url})"
+                "{: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }"
+            )
+        else:
+            buttons.append(
+                f"[Download Skill Package (.skill)]({dl_url})"
+                "{: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }"
+            )
+
+    src_url = f"{GITHUB_REPO_URL}/tree/main/skills/{skill_name}"
+    if lang == "ja":
+        buttons.append(f"[GitHubでソースを見る]({src_url}){{: .btn .fs-5 .mb-4 .mb-md-0 }}")
+    else:
+        buttons.append(f"[View Source on GitHub]({src_url}){{: .btn .fs-5 .mb-4 .mb-md-0 }}")
+
+    return "\n".join(buttons)
+
+
+# ---------------------------------------------------------------------------
 # Page generation
 # ---------------------------------------------------------------------------
 
@@ -258,6 +306,7 @@ def generate_en_page(
     cli_example: str | None,
     nav_order: int,
     resources: dict,
+    skill_packages_dir: Path | None = None,
 ) -> str:
     """Generate an EN documentation page."""
     fm = skill_data["frontmatter"]
@@ -265,6 +314,7 @@ def generate_en_page(
     title = _title_case(skill_name)
     description = fm.get("description", "")
     badges = api_badges(api_info)
+    buttons = _generate_buttons(skill_name, skill_packages_dir, "en")
 
     # Build sections
     overview = _extract_section(sections, ["overview", title.lower()])
@@ -303,7 +353,11 @@ permalink: /en/skills/{skill_name}/
 
 {badges}
 
-<details open markdown="block">
+"""
+    if buttons:
+        page += f"{buttons}\n\n"
+
+    page += f"""<details open markdown="block">
   <summary>Table of Contents</summary>
   {{: .text-delta }}
 - TOC
@@ -374,14 +428,16 @@ def generate_ja_page(
     skill_data: dict,
     api_info: dict | None,
     nav_order: int,
+    skill_packages_dir: Path | None = None,
 ) -> str:
     """Generate a JA documentation page (EN content + translation banner)."""
     fm = skill_data["frontmatter"]
     title = _title_case(skill_name)
     description = fm.get("description", "")
-    badges_ja = api_badges(api_info)
+    badges_ja = api_badges_ja(api_info)
+    buttons = _generate_buttons(skill_name, skill_packages_dir, "ja")
 
-    return f"""---
+    page = f"""---
 layout: default
 title: "{title}"
 grand_parent: 日本語
@@ -399,7 +455,11 @@ permalink: /ja/skills/{skill_name}/
 
 {badges_ja}
 
-> **Note:** This page has not yet been translated into Japanese.
+"""
+    if buttons:
+        page += f"{buttons}\n\n"
+
+    page += f"""> **Note:** This page has not yet been translated into Japanese.
 > Please refer to the [English version]({{{{ '/en/skills/{skill_name}/' | relative_url }}}}) for the full guide.
 {{: .warning }}
 
@@ -407,6 +467,293 @@ permalink: /ja/skills/{skill_name}/
 
 [English版ガイドを見る]({{{{ '/en/skills/{skill_name}/' | relative_url }}}}){{: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }}
 """
+    return page
+
+
+def generate_en_full_page(
+    skill_name: str,
+    skill_data: dict,
+    api_info: dict | None,
+    cli_example: str | None,
+    nav_order: int,
+    resources: dict,
+    skill_packages_dir: Path | None = None,
+) -> str:
+    """Generate a 10-section EN documentation skeleton page."""
+    fm = skill_data["frontmatter"]
+    sections = skill_data["sections"]
+    title = _title_case(skill_name)
+    description = fm.get("description", "")
+    badges = api_badges(api_info)
+    buttons = _generate_buttons(skill_name, skill_packages_dir, "en")
+
+    # Auto-fill content
+    overview = _extract_section(sections, ["overview", title.lower()])
+    if not overview:
+        overview = skill_data["body"].split("\n\n")[0] if skill_data["body"] else description
+
+    prerequisites = _extract_section(sections, ["prerequisites", "pre-requisites"])
+    if not prerequisites:
+        if api_info:
+            prerequisites = _generate_prerequisites_from_api(api_info).rstrip()
+        else:
+            prerequisites = "- **API Key:** None required\n- **Python 3.9+** recommended"
+
+    quick_start = _extract_quick_start(
+        _extract_section(sections, ["workflow", "running the script", "how to run"]),
+        cli_example,
+    )
+
+    refs_list = _format_file_list(
+        resources.get("references", []), f"skills/{skill_name}/references/"
+    )
+    scripts_list = _format_file_list(resources.get("scripts", []), f"skills/{skill_name}/scripts/")
+    resources_text = ""
+    if refs_list:
+        resources_text += f"**References:**\n\n{refs_list}\n\n"
+    if scripts_list:
+        resources_text += f"**Scripts:**\n\n{scripts_list}\n\n"
+    if not resources_text:
+        resources_text = (
+            "This skill uses built-in Claude capabilities without external scripts or references.\n"
+        )
+
+    page = f"""---
+layout: default
+title: "{title}"
+grand_parent: English
+parent: Skill Guides
+nav_order: {nav_order}
+lang_peer: /ja/skills/{skill_name}/
+permalink: /en/skills/{skill_name}/
+---
+
+# {title}
+{{: .no_toc }}
+
+{description}
+{{: .fs-6 .fw-300 }}
+
+{badges}
+
+"""
+    if buttons:
+        page += f"{buttons}\n\n"
+
+    page += f"""<details open markdown="block">
+  <summary>Table of Contents</summary>
+  {{: .text-delta }}
+- TOC
+{{:toc}}
+</details>
+
+---
+
+## 1. Overview
+
+{overview}
+
+---
+
+## 2. Prerequisites
+
+{prerequisites}
+
+---
+
+## 3. Quick Start
+
+{quick_start}
+
+---
+
+## 4. How It Works
+
+<!-- TODO: Describe the internal pipeline/algorithm -->
+
+---
+
+## 5. Usage Examples
+
+<!-- TODO: Add 4-6 real-world usage scenarios -->
+
+---
+
+## 6. Understanding the Output
+
+<!-- TODO: Describe output file format and field definitions -->
+
+---
+
+## 7. Tips & Best Practices
+
+<!-- TODO: Add expert advice for getting the most value -->
+
+---
+
+## 8. Combining with Other Skills
+
+<!-- TODO: Add multi-skill workflow table -->
+
+---
+
+## 9. Troubleshooting
+
+<!-- TODO: Add common errors and fixes -->
+
+---
+
+## 10. Reference
+
+{resources_text}"""
+
+    return page.rstrip() + "\n"
+
+
+def generate_ja_full_page(
+    skill_name: str,
+    skill_data: dict,
+    api_info: dict | None,
+    cli_example: str | None,
+    nav_order: int,
+    resources: dict,
+    skill_packages_dir: Path | None = None,
+) -> str:
+    """Generate a 10-section JA documentation skeleton page."""
+    fm = skill_data["frontmatter"]
+    sections = skill_data["sections"]
+    title = _title_case(skill_name)
+    description = fm.get("description", "")
+    badges = api_badges_ja(api_info)
+    buttons = _generate_buttons(skill_name, skill_packages_dir, "ja")
+
+    # Auto-fill content (same as EN)
+    overview = _extract_section(sections, ["overview", title.lower()])
+    if not overview:
+        overview = skill_data["body"].split("\n\n")[0] if skill_data["body"] else description
+
+    prerequisites = _extract_section(sections, ["prerequisites", "pre-requisites"])
+    if not prerequisites:
+        if api_info:
+            prerequisites = _generate_prerequisites_from_api(api_info).rstrip()
+        else:
+            prerequisites = "- **API Key:** None required\n- **Python 3.9+** recommended"
+
+    quick_start = _extract_quick_start(
+        _extract_section(sections, ["workflow", "running the script", "how to run"]),
+        cli_example,
+    )
+
+    refs_list = _format_file_list(
+        resources.get("references", []), f"skills/{skill_name}/references/"
+    )
+    scripts_list = _format_file_list(resources.get("scripts", []), f"skills/{skill_name}/scripts/")
+    resources_text = ""
+    if refs_list:
+        resources_text += f"**References:**\n\n{refs_list}\n\n"
+    if scripts_list:
+        resources_text += f"**Scripts:**\n\n{scripts_list}\n\n"
+    if not resources_text:
+        resources_text = (
+            "This skill uses built-in Claude capabilities without external scripts or references.\n"
+        )
+
+    page = f"""---
+layout: default
+title: "{title}"
+grand_parent: 日本語
+parent: スキルガイド
+nav_order: {nav_order}
+lang_peer: /en/skills/{skill_name}/
+permalink: /ja/skills/{skill_name}/
+---
+
+# {title}
+{{: .no_toc }}
+
+{description}
+{{: .fs-6 .fw-300 }}
+
+{badges}
+
+"""
+    if buttons:
+        page += f"{buttons}\n\n"
+
+    page += f"""<details open markdown="block">
+  <summary>目次</summary>
+  {{: .text-delta }}
+- TOC
+{{:toc}}
+</details>
+
+---
+
+## 1. 概要
+
+{overview}
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 2. 前提条件
+
+{prerequisites}
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 3. クイックスタート
+
+{quick_start}
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 4. 仕組み
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 5. 使用例
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 6. 出力の読み方
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 7. Tips & ベストプラクティス
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 8. 他スキルとの連携
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 9. トラブルシューティング
+
+<!-- TODO: 翻訳 -->
+
+---
+
+## 10. リファレンス
+
+{resources_text}"""
+
+    return page.rstrip() + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +946,175 @@ def _replace_table_rows(index_path: Path, rows: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Catalog page update
+# ---------------------------------------------------------------------------
+
+_SLUG_RE = re.compile(r"/(?:en|ja)/skills/([\w-]+)/")
+
+
+def _extract_catalog_slugs(text: str) -> set[str]:
+    """Extract all skill slugs from catalog links and bold names."""
+    slugs: set[str] = set()
+
+    # From links like [Name](/en/skills/slug/) or [Name](/ja/skills/slug/)
+    for match in _SLUG_RE.finditer(text):
+        slugs.add(match.group(1))
+
+    # From bold names in table rows: | **Name** | ... |
+    for match in re.finditer(r"\|\s*\*\*([^*]+)\*\*", text):
+        slugs.add(_slugify(match.group(1)))
+
+    # From non-linked, non-bold names in table data rows (e.g., "| Name | ...")
+    # Skip header rows that contain "Skill" or "スキル"
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 3:
+            continue
+        name_col = cols[1]
+        if not name_col or name_col.startswith("---"):
+            continue
+        # Skip headers
+        if name_col in ("Skill", "スキル", "Badge", "バッジ"):
+            continue
+        # Already covered by bold or link patterns
+        if "**" in name_col or "[" in name_col:
+            continue
+        slug = _slugify(name_col)
+        if slug:
+            slugs.add(slug)
+
+    return slugs
+
+
+def _api_status_en(api_info: dict | None) -> tuple[str, str, str]:
+    """Return (fmp, finviz, alpaca) status strings for EN catalog."""
+    if not api_info:
+        return ("--", "--", "--")
+    fmp_raw = api_info.get("fmp", "")
+    finviz_raw = api_info.get("finviz", "")
+    alpaca_raw = api_info.get("alpaca", "")
+
+    fmp = "Required" if "Required" in fmp_raw else ("Optional" if "Optional" in fmp_raw else "--")
+    finviz = (
+        "Recommended"
+        if "Recommended" in finviz_raw
+        else ("Optional" if "Optional" in finviz_raw else "--")
+    )
+    alpaca = "Required" if "Required" in alpaca_raw else "--"
+    return (fmp, finviz, alpaca)
+
+
+def _api_status_ja(api_info: dict | None) -> tuple[str, str, str]:
+    """Return (fmp, finviz, alpaca) status strings for JA catalog."""
+    if not api_info:
+        return ("-", "-", "-")
+    fmp_raw = api_info.get("fmp", "")
+    finviz_raw = api_info.get("finviz", "")
+    alpaca_raw = api_info.get("alpaca", "")
+
+    fmp = "必須" if "Required" in fmp_raw else ("任意" if "Optional" in fmp_raw else "-")
+    finviz = (
+        "推奨" if "Recommended" in finviz_raw else ("任意" if "Optional" in finviz_raw else "-")
+    )
+    alpaca = "必須" if "Required" in alpaca_raw else "-"
+    return (fmp, finviz, alpaca)
+
+
+def update_catalog_api_matrix(
+    docs_dir: Path,
+    all_skills: list[tuple[str, dict, dict | None]],
+) -> None:
+    """Add missing skills to the API Requirements Matrix in catalog pages."""
+    for lang in ("en", "ja"):
+        catalog_path = docs_dir / lang / "skill-catalog.md"
+        if not catalog_path.exists():
+            continue
+
+        text = catalog_path.read_text(encoding="utf-8")
+        existing_slugs = _extract_catalog_slugs(text)
+        lines = text.splitlines()
+
+        # Find the API Requirements Matrix section
+        section_heading = "## API Requirements Matrix" if lang == "en" else "## API要件マトリクス"
+        section_start = None
+        for i, line in enumerate(lines):
+            if line.strip() == section_heading:
+                section_start = i
+                break
+
+        if section_start is None:
+            continue
+
+        # Find the table separator within the section
+        sep_idx = None
+        table_end = None
+        for i in range(section_start, len(lines)):
+            if lines[i].startswith("|---"):
+                sep_idx = i
+            elif sep_idx is not None and i > sep_idx and not lines[i].startswith("|"):
+                table_end = i
+                break
+
+        if sep_idx is None:
+            continue
+        if table_end is None:
+            table_end = len(lines)
+
+        # For JA: find the aggregate row index
+        aggregate_idx = None
+        if lang == "ja":
+            for i in range(sep_idx + 1, table_end):
+                if "その他すべてのスキル" in lines[i]:
+                    aggregate_idx = i
+                    break
+
+        # Collect new rows
+        new_rows: list[str] = []
+        for skill_name, skill_data, api_info in all_skills:
+            slug = _slugify(skill_name)
+            if slug in existing_slugs:
+                continue
+
+            title = _title_case(skill_name)
+
+            if lang == "en":
+                fmp, finviz, alpaca = _api_status_en(api_info)
+                new_rows.append(f"| {title} | {fmp} | {finviz} | {alpaca} |")
+            else:
+                fmp, finviz, alpaca = _api_status_ja(api_info)
+                # Skip skills where all values are "-" for JA
+                if fmp == "-" and finviz == "-" and alpaca == "-":
+                    continue
+                new_rows.append(f"| {title} | {fmp} | {finviz} | {alpaca} |")
+
+        if not new_rows:
+            continue
+
+        # Create backup
+        backup_fd, backup_path = tempfile.mkstemp(suffix=".md.bak")
+        os.close(backup_fd)
+        try:
+            Path(backup_path).write_text(text, encoding="utf-8")
+
+            if lang == "ja" and aggregate_idx is not None:
+                # Insert before the aggregate row
+                updated_lines = lines[:aggregate_idx] + new_rows + lines[aggregate_idx:]
+            else:
+                # Append at end of table (before table_end)
+                updated_lines = lines[:table_end] + new_rows + lines[table_end:]
+
+            catalog_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+            os.unlink(backup_path)
+            print(f"  Updated catalog matrix: {catalog_path} (+{len(new_rows)} rows)")
+        except Exception:
+            # Restore from backup on failure
+            Path(backup_path).replace(catalog_path)
+            raise
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -610,11 +1126,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--claude-md", type=Path, default=DEFAULT_CLAUDE_MD)
     parser.add_argument("--skill", type=str, help="Generate for a single skill")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing pages")
+    parser.add_argument(
+        "--skill-packages-dir",
+        type=Path,
+        default=PROJECT_ROOT / "skill-packages",
+        help="Path to skill-packages directory for download buttons",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["auto", "full"],
+        default="auto",
+        help="Generation mode: 'auto' (6-section) or 'full' (10-section skeleton)",
+    )
+    parser.add_argument(
+        "--catalog-category",
+        type=str,
+        default=None,
+        help='Category for catalog insertion, e.g. "4. Portfolio & Execution"',
+    )
     args = parser.parse_args(argv)
 
     # Parse CLAUDE.md
     api_reqs = parse_api_requirements(args.claude_md)
     cli_examples = parse_cli_examples(args.claude_md)
+
+    # Resolve skill-packages-dir (None if it doesn't exist)
+    skill_packages_dir = args.skill_packages_dir if args.skill_packages_dir.is_dir() else None
 
     # Discover skills
     skill_dirs = sorted(args.skills_dir.iterdir())
@@ -666,22 +1203,67 @@ def main(argv: list[str] | None = None) -> int:
         nav_order = nav_orders.get(name, NAV_ORDER_START)
         resources = _list_skill_resources(d)
 
-        # Generate EN page
-        en_content = generate_en_page(name, skill_data, api_info, cli_example, nav_order, resources)
+        if args.mode == "full":
+            # Generate 10-section skeleton pages
+            en_content = generate_en_full_page(
+                name,
+                skill_data,
+                api_info,
+                cli_example,
+                nav_order,
+                resources,
+                skill_packages_dir=skill_packages_dir,
+            )
+            ja_content = generate_ja_full_page(
+                name,
+                skill_data,
+                api_info,
+                cli_example,
+                nav_order,
+                resources,
+                skill_packages_dir=skill_packages_dir,
+            )
+        else:
+            # Generate 6-section auto pages
+            en_content = generate_en_page(
+                name,
+                skill_data,
+                api_info,
+                cli_example,
+                nav_order,
+                resources,
+                skill_packages_dir=skill_packages_dir,
+            )
+            ja_content = generate_ja_page(
+                name,
+                skill_data,
+                api_info,
+                nav_order,
+                skill_packages_dir=skill_packages_dir,
+            )
+
         en_path.write_text(en_content, encoding="utf-8")
         generated_en += 1
 
-        # Generate JA page
-        ja_content = generate_ja_page(name, skill_data, api_info, nav_order)
         ja_path.write_text(ja_content, encoding="utf-8")
         generated_ja += 1
 
-        print(f"  Generated: {name} (EN + JA)")
+        print(f"  Generated: {name} (EN + JA, mode={args.mode})")
 
     print(f"\nDone: {generated_en} EN + {generated_ja} JA generated, {skipped} skipped")
 
     # Update index pages with current skill table
     update_index_pages(args.skills_dir, args.docs_dir, api_reqs)
+
+    # Update catalog pages with API matrix
+    all_skills_for_catalog: list[tuple[str, dict, dict | None]] = []
+    for d in sorted(args.skills_dir.iterdir()):
+        if not d.is_dir() or not (d / "SKILL.md").exists():
+            continue
+        data = parse_skill_md(d / "SKILL.md")
+        all_skills_for_catalog.append((d.name, data, api_reqs.get(d.name)))
+
+    update_catalog_api_matrix(args.docs_dir, all_skills_for_catalog)
 
     return 0
 

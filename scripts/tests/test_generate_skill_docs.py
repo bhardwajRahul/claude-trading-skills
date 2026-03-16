@@ -12,18 +12,23 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from generate_skill_docs import (
     HAND_WRITTEN,
+    _extract_catalog_slugs,
+    _generate_buttons,
     _slugify,
     _split_sections,
     _title_case,
     api_badges,
     api_badges_ja,
+    generate_en_full_page,
     generate_en_page,
     generate_index_table_row,
+    generate_ja_full_page,
     generate_ja_page,
     main,
     parse_api_requirements,
     parse_cli_examples,
     parse_skill_md,
+    update_catalog_api_matrix,
     update_index_pages,
 )
 
@@ -508,3 +513,330 @@ class TestUpdateIndexPages:
         # No index.md created — should not raise
         api_reqs = parse_api_requirements(tmp_claude_md)
         update_index_pages(tmp_skill / "skills", docs_dir, api_reqs)
+
+
+# ---------------------------------------------------------------------------
+# Tests: JA badge bug fix (Step 1)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateJaPageBadges:
+    def test_ja_badges_used(self, tmp_skill):
+        """Verify JA page uses api_badges_ja (FMP必須) not api_badges (FMP Required)."""
+        data = parse_skill_md(tmp_skill / "skills" / "test-skill" / "SKILL.md")
+        api = {"fmp": "✅ Required", "finviz": "❌", "alpaca": "❌"}
+        page = generate_ja_page("test-skill", data, api, 11)
+        assert "FMP必須" in page
+        assert "FMP Required" not in page
+
+
+# ---------------------------------------------------------------------------
+# Tests: Buttons (Step 2)
+# ---------------------------------------------------------------------------
+
+
+class TestButtons:
+    def test_buttons_en_with_package(self, tmp_path):
+        """When .skill file exists, both Download and Source buttons appear."""
+        pkg_dir = tmp_path / "skill-packages"
+        pkg_dir.mkdir()
+        (pkg_dir / "my-skill.skill").write_text("zip content")
+
+        result = _generate_buttons("my-skill", pkg_dir, "en")
+        assert "Download Skill Package (.skill)" in result
+        assert "skill-packages/my-skill.skill" in result
+        assert "View Source on GitHub" in result
+        assert "skills/my-skill" in result
+        assert ".btn .btn-primary" in result
+
+    def test_buttons_en_without_package(self, tmp_path):
+        """When .skill file does not exist, only Source button appears."""
+        pkg_dir = tmp_path / "skill-packages"
+        pkg_dir.mkdir()
+        # No .skill file created
+
+        result = _generate_buttons("my-skill", pkg_dir, "en")
+        assert "Download Skill Package" not in result
+        assert "View Source on GitHub" in result
+
+    def test_buttons_ja(self, tmp_path):
+        """JA buttons use Japanese text."""
+        pkg_dir = tmp_path / "skill-packages"
+        pkg_dir.mkdir()
+        (pkg_dir / "my-skill.skill").write_text("zip content")
+
+        result = _generate_buttons("my-skill", pkg_dir, "ja")
+        assert "スキルパッケージをダウンロード (.skill)" in result
+        assert "GitHubでソースを見る" in result
+
+    def test_buttons_none(self):
+        """When skill_packages_dir is None, return empty string."""
+        result = _generate_buttons("my-skill", None, "en")
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: Full page generation (Step 3)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateEnFullPage:
+    def test_full_page_has_10_sections(self, tmp_skill):
+        data = parse_skill_md(tmp_skill / "skills" / "test-skill" / "SKILL.md")
+        page = generate_en_full_page(
+            "test-skill",
+            data,
+            None,
+            None,
+            11,
+            {"references": ["methodology.md"], "scripts": ["test_runner.py"]},
+        )
+        for heading in [
+            "## 1. Overview",
+            "## 2. Prerequisites",
+            "## 3. Quick Start",
+            "## 4. How It Works",
+            "## 5. Usage Examples",
+            "## 6. Understanding the Output",
+            "## 7. Tips & Best Practices",
+            "## 8. Combining with Other Skills",
+            "## 9. Troubleshooting",
+            "## 10. Reference",
+        ]:
+            assert heading in page, f"Missing heading: {heading}"
+
+    def test_full_page_has_todo_markers(self, tmp_skill):
+        data = parse_skill_md(tmp_skill / "skills" / "test-skill" / "SKILL.md")
+        page = generate_en_full_page(
+            "test-skill",
+            data,
+            None,
+            None,
+            11,
+            {"references": [], "scripts": []},
+        )
+        # Sections 4-9 should have TODO comments
+        assert "<!-- TODO: Describe the internal pipeline/algorithm -->" in page
+        assert "<!-- TODO: Add 4-6 real-world usage scenarios -->" in page
+        assert "<!-- TODO: Describe output file format and field definitions -->" in page
+        assert "<!-- TODO: Add expert advice for getting the most value -->" in page
+        assert "<!-- TODO: Add multi-skill workflow table -->" in page
+        assert "<!-- TODO: Add common errors and fixes -->" in page
+
+    def test_full_page_auto_fills_overview(self, tmp_skill):
+        data = parse_skill_md(tmp_skill / "skills" / "test-skill" / "SKILL.md")
+        page = generate_en_full_page(
+            "test-skill",
+            data,
+            None,
+            None,
+            11,
+            {"references": [], "scripts": []},
+        )
+        assert "testing things" in page
+
+    def test_full_page_has_buttons(self, tmp_path, tmp_skill):
+        data = parse_skill_md(tmp_skill / "skills" / "test-skill" / "SKILL.md")
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        (pkg_dir / "test-skill.skill").write_text("zip")
+
+        page = generate_en_full_page(
+            "test-skill",
+            data,
+            None,
+            None,
+            11,
+            {"references": [], "scripts": []},
+            skill_packages_dir=pkg_dir,
+        )
+        assert "Download Skill Package" in page
+        assert "View Source on GitHub" in page
+
+
+class TestGenerateJaFullPage:
+    def test_ja_full_page_has_ja_headings(self, tmp_skill):
+        data = parse_skill_md(tmp_skill / "skills" / "test-skill" / "SKILL.md")
+        page = generate_ja_full_page(
+            "test-skill",
+            data,
+            None,
+            None,
+            11,
+            {"references": ["methodology.md"], "scripts": ["test_runner.py"]},
+        )
+        for heading in [
+            "## 1. 概要",
+            "## 2. 前提条件",
+            "## 3. クイックスタート",
+            "## 4. 仕組み",
+            "## 5. 使用例",
+            "## 6. 出力の読み方",
+            "## 7. Tips & ベストプラクティス",
+            "## 8. 他スキルとの連携",
+            "## 9. トラブルシューティング",
+            "## 10. リファレンス",
+        ]:
+            assert heading in page, f"Missing JA heading: {heading}"
+
+    def test_ja_full_page_has_ja_badges(self, tmp_skill):
+        data = parse_skill_md(tmp_skill / "skills" / "test-skill" / "SKILL.md")
+        api = {"fmp": "✅ Required", "finviz": "❌", "alpaca": "❌"}
+        page = generate_ja_full_page(
+            "test-skill",
+            data,
+            api,
+            None,
+            11,
+            {"references": [], "scripts": []},
+        )
+        assert "FMP必須" in page
+        assert "FMP Required" not in page
+
+    def test_ja_full_page_has_todo_translation(self, tmp_skill):
+        data = parse_skill_md(tmp_skill / "skills" / "test-skill" / "SKILL.md")
+        page = generate_ja_full_page(
+            "test-skill",
+            data,
+            None,
+            None,
+            11,
+            {"references": [], "scripts": []},
+        )
+        assert "<!-- TODO: 翻訳 -->" in page
+
+
+# ---------------------------------------------------------------------------
+# Tests: Catalog API matrix (Step 4)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractCatalogSlugs:
+    def test_extracts_linked_slugs(self):
+        text = "| [Name](/en/skills/my-skill/) | desc |\n| [Other](/ja/skills/other-one/) | x |"
+        slugs = _extract_catalog_slugs(text)
+        assert "my-skill" in slugs
+        assert "other-one" in slugs
+
+    def test_extracts_bold_names(self):
+        text = "| **Theme Detector** | desc | badge |\n| **VCP Screener** | desc | badge |"
+        slugs = _extract_catalog_slugs(text)
+        assert "theme-detector" in slugs
+        assert "vcp-screener" in slugs
+
+
+class TestUpdateCatalogApiMatrix:
+    def _make_en_catalog(self, docs_dir):
+        """Create a minimal EN catalog with an API Requirements Matrix."""
+        en_dir = docs_dir / "en"
+        en_dir.mkdir(parents=True, exist_ok=True)
+        catalog = en_dir / "skill-catalog.md"
+        catalog.write_text(
+            textwrap.dedent("""\
+            # Skill Catalog
+
+            ## API Requirements Matrix
+
+            | Skill | FMP | FINVIZ Elite | Alpaca |
+            |-------|-----|-------------|--------|
+            | Existing Skill | Required | -- | -- |
+
+            "--" means not required.
+            """)
+        )
+        return catalog
+
+    def _make_ja_catalog(self, docs_dir):
+        """Create a minimal JA catalog with an API要件マトリクス."""
+        ja_dir = docs_dir / "ja"
+        ja_dir.mkdir(parents=True, exist_ok=True)
+        catalog = ja_dir / "skill-catalog.md"
+        catalog.write_text(
+            textwrap.dedent("""\
+            # スキル一覧
+
+            ## API要件マトリクス
+
+            | スキル | FMP | FINVIZ Elite | Alpaca |
+            |--------|-----|-------------|--------|
+            | Existing Skill | 必須 | - | - |
+            | その他すべてのスキル | - | - | - |
+
+            「-」は不要を意味します。
+            """)
+        )
+        return catalog
+
+    def test_adds_missing_skill_to_en_matrix(self, tmp_path):
+        docs_dir = tmp_path / "docs"
+        catalog = self._make_en_catalog(docs_dir)
+
+        all_skills = [
+            (
+                "new-skill",
+                {"frontmatter": {"name": "new-skill", "description": "A new skill"}},
+                {"fmp": "✅ Required", "finviz": "❌ Not used", "alpaca": "❌ Not used"},
+            ),
+        ]
+        update_catalog_api_matrix(docs_dir, all_skills)
+        content = catalog.read_text()
+        assert "New Skill" in content
+        assert "Existing Skill" in content
+
+    def test_skips_existing_skill_in_matrix(self, tmp_path):
+        docs_dir = tmp_path / "docs"
+        catalog = self._make_en_catalog(docs_dir)
+
+        all_skills = [
+            (
+                "existing-skill",
+                {"frontmatter": {"name": "existing-skill", "description": "Already there"}},
+                {"fmp": "✅ Required", "finviz": "❌ Not used", "alpaca": "❌ Not used"},
+            ),
+        ]
+        update_catalog_api_matrix(docs_dir, all_skills)
+        content = catalog.read_text()
+        # Should still have exactly one "Existing Skill" row
+        assert content.count("Existing Skill") == 1
+
+    def test_ja_inserts_before_aggregate_row(self, tmp_path):
+        docs_dir = tmp_path / "docs"
+        catalog = self._make_ja_catalog(docs_dir)
+
+        all_skills = [
+            (
+                "new-skill",
+                {"frontmatter": {"name": "new-skill", "description": "A new skill"}},
+                {"fmp": "✅ Required", "finviz": "❌ Not used", "alpaca": "❌ Not used"},
+            ),
+        ]
+        update_catalog_api_matrix(docs_dir, all_skills)
+        content = catalog.read_text()
+        lines = content.splitlines()
+        # Find "New Skill" and "その他すべてのスキル"
+        new_idx = None
+        agg_idx = None
+        for i, line in enumerate(lines):
+            if "New Skill" in line:
+                new_idx = i
+            if "その他すべてのスキル" in line:
+                agg_idx = i
+        assert new_idx is not None, "New Skill row not found"
+        assert agg_idx is not None, "Aggregate row not found"
+        assert new_idx < agg_idx, "New skill should appear before aggregate row"
+
+    def test_ja_skips_all_dash_skill(self, tmp_path):
+        docs_dir = tmp_path / "docs"
+        catalog = self._make_ja_catalog(docs_dir)
+
+        all_skills = [
+            (
+                "free-skill",
+                {"frontmatter": {"name": "free-skill", "description": "No API needed"}},
+                {"fmp": "❌ Not required", "finviz": "❌ Not used", "alpaca": "❌ Not used"},
+            ),
+        ]
+        update_catalog_api_matrix(docs_dir, all_skills)
+        content = catalog.read_text()
+        # free-skill should not be added to JA because all values are "-"
+        assert "Free Skill" not in content
