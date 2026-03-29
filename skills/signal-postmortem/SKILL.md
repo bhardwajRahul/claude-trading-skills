@@ -25,6 +25,16 @@ Signal Postmortem records and analyzes the outcomes of trading signals generated
 - Standard library + `requests` for API calls
 - Input: signal records in JSON format (from edge-signal-aggregator or screener outputs)
 
+### API Key Setup (Optional)
+
+If you want to automatically fetch price data for return calculations, set up the FMP API key:
+
+```bash
+export FMP_API_KEY=your_api_key_here
+```
+
+Alternatively, pass the key via command line with `--api-key YOUR_KEY`. Without an API key, you can still record outcomes manually by providing `--exit-price` and `--exit-date`.
+
 ## Workflow
 
 ### Step 1: Prepare Signal Records
