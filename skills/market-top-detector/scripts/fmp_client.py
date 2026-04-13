@@ -67,6 +67,8 @@ class FMPClient:
     BASE_URL = "https://financialmodelingprep.com/api/v3"
     RATE_LIMIT_DELAY = 0.3  # 300ms between requests
 
+    _ENDPOINT_FAILURE_THRESHOLD = 3  # disable endpoint after N consecutive failures
+
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("FMP_API_KEY")
         if not self.api_key:
@@ -82,6 +84,9 @@ class FMPClient:
         self.retry_count = 0
         self.max_retries = 1
         self.api_calls_made = 0
+        # Circuit breaker: track consecutive failures per endpoint URL prefix
+        self._endpoint_failures: dict[str, int] = {}
+        self._disabled_endpoints: set[str] = set()
 
     def _rate_limited_get(
         self, url: str, params: Optional[dict] = None, quiet: bool = False
@@ -136,46 +141,64 @@ class FMPClient:
         is_single = "," not in symbols_str
 
         for i, (base_url, url_builder) in enumerate(endpoints):
+            # Circuit breaker: skip endpoints with too many consecutive failures
+            if base_url in self._disabled_endpoints:
+                continue
+
             url, final_params = url_builder(base_url, symbols_str, dict(params))
             is_last = i == len(endpoints) - 1
             data = self._rate_limited_get(url, final_params, quiet=not is_last)
             if not data:  # falsy (None, [], {}) — try next endpoint
+                self._record_endpoint_failure(base_url)
                 continue
 
             # Shape validation: reject truthy-but-wrong-shape responses
+            valid = True
             if endpoint_key == "quote":
                 if not isinstance(data, list) or len(data) == 0:
-                    continue  # callers expect non-empty list
-                # Single-symbol: verify returned symbol matches request
-                if is_single and not any(
+                    valid = False
+                elif is_single and not any(
                     q.get("symbol", "").replace("-", ".") == symbols_str.replace("-", ".")
                     for q in data
                 ):
-                    continue
+                    valid = False
 
             if endpoint_key == "historical":
                 if not isinstance(data, dict):
-                    continue  # callers expect dict with .get("historical")
-                if "historicalStockList" in data:
+                    valid = False
+                elif "historicalStockList" in data:
                     # stable batch format -> v3 single format (exact match only)
                     norm = symbols_str.replace("-", ".")
+                    found = None
                     for entry in data["historicalStockList"]:
                         if entry.get("symbol", "").replace("-", ".") == norm:
-                            return {
+                            found = {
                                 "symbol": entry.get("symbol"),
                                 "historical": entry.get("historical", []),
                             }
-                    # Symbol not found — this endpoint is no good, try next
-                    continue
+                            break
+                    if found:
+                        self._endpoint_failures[base_url] = 0
+                        return found
+                    valid = False
                 elif "historical" not in data:
-                    continue  # truthy dict but missing expected key
-                # Single-symbol: verify returned symbol matches request
+                    valid = False
                 elif is_single and data.get("symbol"):
                     if data["symbol"].replace("-", ".") != symbols_str.replace("-", "."):
-                        continue
+                        valid = False
 
-            return data
+            if valid:
+                self._endpoint_failures[base_url] = 0
+                return data
+            self._record_endpoint_failure(base_url)
         return None
+
+    def _record_endpoint_failure(self, base_url: str) -> None:
+        """Track consecutive failures and disable endpoint after threshold."""
+        failures = self._endpoint_failures.get(base_url, 0) + 1
+        self._endpoint_failures[base_url] = failures
+        if failures >= self._ENDPOINT_FAILURE_THRESHOLD:
+            self._disabled_endpoints.add(base_url)
 
     def get_quote(self, symbols: str) -> Optional[list[dict]]:
         """Fetch real-time quote data for one or more symbols (comma-separated)"""
