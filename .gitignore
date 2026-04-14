@@ -29,10 +29,9 @@ logs/
 # Jupyter
 .ipynb_checkpoints/
 
-# Generated reports & output
+# Generated reports
 reports/
 reviews/
-market_top_*.json
 
 # CI artifacts
 htmlcov/
