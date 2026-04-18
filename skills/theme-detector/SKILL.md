@@ -50,33 +50,46 @@ This skill detects and ranks trending market themes by analyzing cross-sector mo
 
 ---
 
-## Workflow
+## Prerequisites
 
-### Step 1: Verify Requirements
+**Required:**
+- Python 3.7+ with core dependencies:
+  ```bash
+  pip install requests beautifulsoup4 lxml pandas numpy yfinance
+  ```
 
-Check for required API keys and dependencies:
+**Optional API Keys:**
 
+FINVIZ Elite (recommended for full industry coverage and speed):
 ```bash
-# Check for FINVIZ Elite API key (optional but recommended)
-echo $FINVIZ_API_KEY
-
-# Check for FMP API key (optional, used for valuation metrics)
-echo $FMP_API_KEY
+export FINVIZ_API_KEY=your_finviz_elite_api_key_here
 ```
 
-**Requirements:**
-- **Python 3.7+** with `requests`, `beautifulsoup4`, `lxml`, `pandas`, `numpy`, `yfinance`
-- **FINVIZ Elite API key** (recommended for full industry coverage and speed)
-- **FMP API key** (optional, for P/E ratio valuation data)
-- Without FINVIZ Elite, the skill uses public FINVIZ scraping (limited to ~20 stocks per industry, slower rate limits)
-
-**Optional dependencies:**
-- `finvizfinance` (for FINVIZ Elite mode)
-- `PyYAML` (for `--themes-config` custom themes)
-
-**Installation:**
+FMP API (optional, for P/E ratio valuation data):
 ```bash
-pip install requests beautifulsoup4 lxml pandas numpy yfinance
+export FMP_API_KEY=your_fmp_api_key_here
+```
+
+**Optional Python packages:**
+- `finvizfinance` - Required for FINVIZ Elite mode
+- `PyYAML` - Required for `--themes-config` custom themes
+
+Without FINVIZ Elite, the skill uses public FINVIZ scraping (limited to ~20 stocks per industry, slower rate limits).
+
+---
+
+## Workflow
+
+### Step 1: Verify Environment
+
+Check that API keys are configured (see Prerequisites):
+
+```bash
+# Verify FINVIZ Elite API key (optional but recommended)
+echo $FINVIZ_API_KEY
+
+# Verify FMP API key (optional)
+echo $FMP_API_KEY
 ```
 
 ### Step 2: Execute Theme Detection Script
@@ -225,6 +238,53 @@ Present the final report to the user using the report template structure:
 ```
 
 Save the report to `reports/` directory.
+
+---
+
+## Output
+
+The skill generates two output files in the `reports/` directory:
+
+**JSON Output** (`theme_detector_YYYY-MM-DD_HHMMSS.json`):
+```json
+{
+  "metadata": {
+    "generated_at": "2026-04-18T10:30:00Z",
+    "finviz_mode": "elite",
+    "themes_analyzed": 14
+  },
+  "themes": [
+    {
+      "name": "AI & Machine Learning",
+      "heat_score": 85,
+      "direction": "bullish",
+      "lifecycle": "Accelerating",
+      "confidence": "Medium",
+      "industries": ["Software - Infrastructure", "Semiconductors"],
+      "top_stocks": ["NVDA", "MSFT", "GOOGL"],
+      "etf_count": 12
+    }
+  ],
+  "industry_rankings": [...],
+  "sector_uptrend_ratios": [...]
+}
+```
+
+**Markdown Report** (`theme_detector_YYYY-MM-DD_HHMMSS.md`):
+- Theme Dashboard with sortable rankings
+- Bullish/Bearish theme detail sections
+- Industry performance rankings
+- Sector uptrend ratio summary
+- Methodology notes
+
+**Key Output Fields:**
+| Field | Description |
+|-------|-------------|
+| `heat_score` | 0-100 direction-neutral theme strength |
+| `direction` | "bullish" (LEAD) or "bearish" (LAG) |
+| `lifecycle` | Emerging / Accelerating / Trending / Mature / Exhausting |
+| `confidence` | Low / Medium / High (script caps at Medium; WebSearch can elevate) |
+| `etf_count` | Number of thematic ETFs (higher = more crowded) |
 
 ---
 
