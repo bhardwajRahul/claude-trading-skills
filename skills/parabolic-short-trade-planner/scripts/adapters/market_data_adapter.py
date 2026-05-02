@@ -37,10 +37,14 @@ class MarketDataAdapter(ABC):
           - chronological (oldest first),
           - all from the regular cash session (09:30–16:00 ET) of
             ``session_date``,
-          - filtered to ``ts_et <= until_et`` so the FSM only sees
-            bars that have actually closed,
+          - filtered to **confirmed** bars only: a bar with ``ts_et =
+            T`` covers ``[T, T+5min)`` and is confirmed at ``T+5min``,
+            so the bar is included iff ``T + 5min <= until_et``.
+            Implementations MUST NOT include unconfirmed (still-open)
+            bars even if Alpaca returns them with the current minute's
+            timestamp,
           - in this dict shape exactly:
-              {"ts_et": <ISO 8601 with America/New_York tz>,
+              {"ts_et": <ISO 8601 with America/New_York tz; bar-open>,
                "o": float, "h": float, "l": float, "c": float,
                "v": int}
 

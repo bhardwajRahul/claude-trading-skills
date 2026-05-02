@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 try:
     import requests
@@ -35,6 +35,7 @@ from market_data_adapter import MarketDataAdapter
 
 DATA_BASE_URL = "https://data.alpaca.markets"
 TIMEFRAME = "5Min"
+BAR_DURATION = timedelta(minutes=5)
 
 logger = logging.getLogger("parabolic_short.alpaca_market_data")
 
@@ -142,7 +143,19 @@ def _convert_and_filter(
     session_date: str,
     until_et: datetime,
 ) -> list[dict]:
-    """Normalise Alpaca's wire shape and apply the contract filters."""
+    """Normalise Alpaca's wire shape and apply the contract filters.
+
+    Alpaca's bar timestamp ``t`` is the **bar-open** instant (start of
+    the 5-minute interval). A bar with ``t = 09:35:00`` covers
+    09:35–09:40 and is **not yet confirmed at 09:35** — it confirms at
+    09:40 when the next bar starts. The contract Phase 3 needs is
+    "only evaluate confirmed bars", so we filter on ``bar_close =
+    bar_start + 5 min`` instead of ``bar_start <= until_et``. ``ts_et``
+    in the output dict is kept as the bar-open time (the convention the
+    rest of the FSM uses for transition timestamps), with the explicit
+    documented meaning of "the start of the bar that triggered the
+    transition" (i.e. the 5-min interval whose close fired the move).
+    """
     open_et = datetime.combine(
         datetime.strptime(session_date, "%Y-%m-%d").date(),
         time(REGULAR_OPEN_HOUR, REGULAR_OPEN_MINUTE),
@@ -163,14 +176,17 @@ def _convert_and_filter(
             ts_utc_str = ts_utc_str[:-1] + "+00:00"
         ts_utc = datetime.fromisoformat(ts_utc_str)
         ts_et = ts_utc.astimezone(ET)
+        bar_close_et = ts_et + BAR_DURATION
 
-        # Regular-session filter: 09:30 ≤ ts < 16:00 ET on the
+        # Regular-session filter: 09:30 ≤ bar_start < 16:00 ET on the
         # requested session_date.
         if ts_et.date().isoformat() != session_date:
             continue
         if not (open_et <= ts_et < close_et):
             continue
-        if ts_et > until_et:
+        # Confirmation filter: only include bars whose CLOSE
+        # (bar_start + 5 min) is at or before until_et.
+        if bar_close_et > until_et:
             continue
 
         out.append(

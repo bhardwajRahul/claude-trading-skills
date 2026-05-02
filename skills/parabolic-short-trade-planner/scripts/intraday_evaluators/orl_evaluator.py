@@ -29,11 +29,15 @@ Inputs:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from vwap import vwap_for_each_bar
 
 TRIGGER_TYPE = "orl_5min_break"
 ORL_VOLUME_MULTIPLIER = 1.2
 ENTRY_OFFSET_BELOW_ORL = 0.05  # entry hint string: "5min_orl_low - 0.05"
+OPENING_BAR_HOUR = 9
+OPENING_BAR_MINUTE = 30
 
 
 def _empty_state(plan: dict) -> dict:
@@ -78,6 +82,18 @@ def evaluate(
     if atr_14 is None:
         out["evaluation_status"] = "skipped"
         out["skip_reason"] = "atr_14_unavailable"
+        return out
+
+    # The first bar of the regular session MUST be the 09:30 ET bar
+    # (which covers 09:30-09:35 with bar-open semantics). Alpaca skips
+    # bars during halts or empty intervals, so bars[0] could be 09:35
+    # or later if there were no trades in the opening 5 minutes — in
+    # that rare case we cannot establish ORL low/high/volume and must
+    # skip rather than mis-anchor on a later bar.
+    first_bar_ts = datetime.fromisoformat(bars[0]["ts_et"])
+    if (first_bar_ts.hour, first_bar_ts.minute) != (OPENING_BAR_HOUR, OPENING_BAR_MINUTE):
+        out["evaluation_status"] = "skipped"
+        out["skip_reason"] = "opening_range_bar_unavailable"
         return out
 
     if vwap_series is None:

@@ -91,6 +91,20 @@ class TestSkipPath:
         # No FSM advancement: triggered/invalidated still null.
         assert out["triggered_at"] is None
 
+    def test_opening_range_bar_missing_yields_skipped(self):
+        # Alpaca skips empty / halt intervals, so bars[0] could be
+        # 09:35 instead of 09:30 when the opening 5 minutes had no
+        # trades. ORL cannot anchor on a later bar — must skip.
+        bars = _load_bars("orl_clean_break.json", "AAPL")[1:]  # drop the 09:30 bar
+        assert bars[0]["ts_et"].endswith("09:35:00-04:00")
+        out = orl.evaluate(_orl_plan(), bars, atr_14=2.0)
+        assert out["state"] == "armed"
+        assert out["evaluation_status"] == "skipped"
+        assert out["skip_reason"] == "opening_range_bar_unavailable"
+        # No ORL fields populated since we couldn't anchor.
+        assert out["orl_low"] is None
+        assert out["triggered_at"] is None
+
 
 class TestIdempotency:
     def test_same_input_produces_same_output(self):

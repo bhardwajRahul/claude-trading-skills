@@ -93,4 +93,12 @@ class TestSmokePipeline:
         for plan in report["monitored_plans"]:
             assert plan["evaluation_status"] == "no_bars"
             assert plan["state"] == "armed"  # carried forward / default
+            # Schema parity (v0.5d): every monitored plan carries
+            # shares_actual + size_recipe_resolved keys, even when
+            # there are no bars. Downstream consumers can read them
+            # uniformly.
+            assert "shares_actual" in plan
+            assert "size_recipe_resolved" in plan
+            assert plan["shares_actual"] is None
+            assert plan["size_recipe_resolved"] is None
         assert report["market_status"] == "closed"

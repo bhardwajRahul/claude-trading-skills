@@ -22,6 +22,16 @@
 > - Idempotency: every Phase 3 run replays the full session bars; the
 >   FSM is a pure function of `(plan, bars, atr_14)`. `prior_state`
 >   is consulted only for display continuity / notification diffs.
+> - Bar timing (v0.5d): `ts_et` on each bar is the **bar-open**
+>   instant (matches Alpaca wire). A bar with `ts_et = T` covers
+>   `[T, T+5min)` and is *confirmed* at `T+5min`. The Phase 3
+>   adapters only return confirmed bars (`bar_open + 5min <=
+>   until_et`); the FSM never sees an in-progress current bar.
+> - ORL anchoring: the Opening Range bar must be the 09:30 ET bar.
+>   When Alpaca skips that interval (no trades / halt at the open),
+>   the ORL evaluator emits `evaluation_status="skipped"` +
+>   `skip_reason="opening_range_bar_unavailable"` rather than
+>   anchoring on a later bar.
 
 ## 5-min Opening Range Low (ORL) break
 

@@ -160,7 +160,13 @@ def _no_bars_state(plan: dict, prior_state: dict | None) -> dict:
     """Display-only carry-forward when the adapter returns []. The FSM
     is NOT advanced; we just preserve the prior FSM state for UI
     continuity (per v0.5c contract — the single exception to the
-    prior-state-free FSM rule)."""
+    prior-state-free FSM rule).
+
+    Schema parity (v0.5d): emits ``shares_actual`` and
+    ``size_recipe_resolved`` keys (both null) so downstream consumers
+    can rely on every ``monitored_plans[*]`` entry having the same
+    key set, regardless of whether bars were available.
+    """
     base = {
         "plan_id": plan["plan_id"],
         "ticker": plan["ticker"],
@@ -174,6 +180,8 @@ def _no_bars_state(plan: dict, prior_state: dict | None) -> dict:
         "invalidation_reason": None,
         "entry_actual": None,
         "stop_actual": None,
+        "shares_actual": None,
+        "size_recipe_resolved": None,
         "session_high": None,
         "session_low": None,
         "last_bar_ts": None,
@@ -188,6 +196,8 @@ def _no_bars_state(plan: dict, prior_state: dict | None) -> dict:
             "invalidation_reason",
             "entry_actual",
             "stop_actual",
+            "shares_actual",
+            "size_recipe_resolved",
             "session_high",
             "session_low",
             "last_bar_ts",

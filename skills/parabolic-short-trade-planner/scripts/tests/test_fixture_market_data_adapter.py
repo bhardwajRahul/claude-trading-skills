@@ -55,14 +55,24 @@ def mixed_fixture(tmp_path):
 
 class TestFiltering:
     def test_until_et_truncates_future_bars(self, mixed_fixture):
+        # bar_open=09:30 closes 09:35 ≤ 09:40 ✓; 09:35 closes 09:40 ≤ 09:40 ✓;
+        # 09:40 bar closes 09:45 > 09:40 ✗ (still open at 09:40).
         adapter = FixtureBarsAdapter(mixed_fixture)
-        until = datetime(2026, 5, 5, 9, 40, tzinfo=ET)  # the 09:40 bar IS included
+        until = datetime(2026, 5, 5, 9, 40, tzinfo=ET)
         bars = adapter.get_bars_5min("AAPL", session_date="2026-05-05", until_et=until)
         assert [b["ts_et"] for b in bars] == [
             "2026-05-05T09:30:00-04:00",
             "2026-05-05T09:35:00-04:00",
-            "2026-05-05T09:40:00-04:00",
         ]
+
+    def test_unconfirmed_current_minute_bar_excluded(self, mixed_fixture):
+        # The 09:35 bar covers [09:35, 09:40). At until_et=09:35 it is
+        # NOT yet confirmed (it confirms at 09:40). Only the 09:30 bar
+        # (which closes at 09:35) is confirmed at this clock.
+        adapter = FixtureBarsAdapter(mixed_fixture)
+        until = datetime(2026, 5, 5, 9, 35, tzinfo=ET)
+        bars = adapter.get_bars_5min("AAPL", session_date="2026-05-05", until_et=until)
+        assert [b["ts_et"] for b in bars] == ["2026-05-05T09:30:00-04:00"]
 
     def test_pre_open_returns_empty(self, mixed_fixture):
         adapter = FixtureBarsAdapter(mixed_fixture)
@@ -90,11 +100,14 @@ class TestFiltering:
             )
 
     def test_multi_symbol_fixture_independent(self, mixed_fixture):
+        # At until_et=09:40: AAPL has 09:30/09:35 confirmed (2 bars);
+        # NVDA has 09:30/09:35 confirmed (2 bars). The 09:40 bar of
+        # AAPL is still open, so it's excluded.
         adapter = FixtureBarsAdapter(mixed_fixture)
         until = datetime(2026, 5, 5, 9, 40, tzinfo=ET)
         aapl = adapter.get_bars_5min("AAPL", session_date="2026-05-05", until_et=until)
         nvda = adapter.get_bars_5min("NVDA", session_date="2026-05-05", until_et=until)
-        assert len(aapl) == 3
+        assert len(aapl) == 2
         assert len(nvda) == 2
 
     def test_fixture_with_naive_ts_raises(self, tmp_path):

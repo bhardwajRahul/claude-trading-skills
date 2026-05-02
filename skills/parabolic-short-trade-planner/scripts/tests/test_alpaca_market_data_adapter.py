@@ -80,6 +80,31 @@ def adapter():
 class TestHappyPath:
     def test_single_page_returns_converted_bars(self, adapter):
         # 09:30 ET on 2026-05-05 = 13:30 UTC (EDT, -04:00).
+        # until_et=09:40 confirms both bars (09:30 closes at 09:35,
+        # 09:35 closes at 09:40 — both ≤ 09:40).
+        wire = [
+            _bar_alpaca("2026-05-05T13:30:00Z", 150.00),
+            _bar_alpaca("2026-05-05T13:35:00Z", 150.20),
+        ]
+        with patch("requests.get", return_value=_alpaca_bars_response(wire)):
+            bars = adapter.get_bars_5min(
+                "AAPL",
+                session_date="2026-05-05",
+                until_et=datetime(2026, 5, 5, 9, 40, tzinfo=ET),
+            )
+        assert len(bars) == 2
+        # Required dict shape
+        assert set(bars[0].keys()) == {"ts_et", "o", "h", "l", "c", "v"}
+        # ts_et carries an ET tz-offset suffix and is bar-OPEN time
+        # (matches Alpaca wire); the bar covers [09:30, 09:35).
+        assert bars[0]["ts_et"].startswith("2026-05-05T09:30:00")
+        assert bars[0]["ts_et"].endswith("-04:00")
+        assert bars[0]["c"] == 150.00
+
+    def test_unconfirmed_current_minute_bar_excluded(self, adapter):
+        # The 09:35 bar covers [09:35, 09:40) and is NOT confirmed at
+        # until_et=09:35 — it confirms at 09:40. The Phase 3 contract
+        # requires only confirmed bars, so the FSM never sees it.
         wire = [
             _bar_alpaca("2026-05-05T13:30:00Z", 150.00),
             _bar_alpaca("2026-05-05T13:35:00Z", 150.20),
@@ -90,13 +115,9 @@ class TestHappyPath:
                 session_date="2026-05-05",
                 until_et=datetime(2026, 5, 5, 9, 35, tzinfo=ET),
             )
-        assert len(bars) == 2
-        # Required dict shape
-        assert set(bars[0].keys()) == {"ts_et", "o", "h", "l", "c", "v"}
-        # ts_et carries an ET tz-offset suffix
+        # Only the 09:30 bar (closes at 09:35) is confirmed.
+        assert len(bars) == 1
         assert bars[0]["ts_et"].startswith("2026-05-05T09:30:00")
-        assert bars[0]["ts_et"].endswith("-04:00")
-        assert bars[0]["c"] == 150.00
 
     def test_request_uses_rfc3339_utc_for_start_end(self, adapter):
         captured = {}
@@ -213,6 +234,8 @@ class TestErrorHandling:
 
 class TestUntilEtFilter:
     def test_bars_after_until_et_dropped(self, adapter):
+        # until_et=09:40 confirms 09:30 (closes 09:35) and 09:35
+        # (closes 09:40) but NOT 09:40 (closes 09:45).
         wire = [
             _bar_alpaca("2026-05-05T13:30:00Z", 150.0),
             _bar_alpaca("2026-05-05T13:35:00Z", 150.5),
@@ -222,9 +245,9 @@ class TestUntilEtFilter:
             bars = adapter.get_bars_5min(
                 "AAPL",
                 session_date="2026-05-05",
-                until_et=datetime(2026, 5, 5, 9, 35, tzinfo=ET),
+                until_et=datetime(2026, 5, 5, 9, 40, tzinfo=ET),
             )
-        # 09:30 and 09:35 included; 09:40 dropped.
+        # 09:30 and 09:35 included; 09:40 dropped (still open at 09:40).
         assert len(bars) == 2
 
 

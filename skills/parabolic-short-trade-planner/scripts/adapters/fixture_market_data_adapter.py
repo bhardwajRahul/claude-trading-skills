@@ -11,18 +11,22 @@ A fixture file is a JSON object mapping ticker symbol → list of bars:
       "NVDA": [...]
     }
 
-Bars in the fixture should be pre-sorted chronological. The adapter
-filters by ``until_et`` so a single fixture can simulate an entire
-session by varying the simulated clock between runs.
+Bars in the fixture should be pre-sorted chronological and use
+**bar-open** semantics for ``ts_et`` (matching Alpaca wire). The
+adapter only returns *confirmed* bars: a bar with ``ts_et = T``
+covers ``[T, T+5min)`` and is confirmed at ``T+5min``, so it is
+included only when ``T + 5min <= until_et``.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from market_data_adapter import MarketDataAdapter
+
+BAR_DURATION = timedelta(minutes=5)
 
 
 class FixtureBarsAdapter(MarketDataAdapter):
@@ -62,10 +66,13 @@ class FixtureBarsAdapter(MarketDataAdapter):
                 # Defensive: a fixture writer might forget the offset.
                 raise ValueError(f"Fixture bar for {symbol} is missing tz: {bar['ts_et']}")
             # Filter to the requested session date (ET wall-clock) and to
-            # bars that have already closed at-or-before until_et.
+            # bars that have CLOSED at or before until_et (bar_open + 5
+            # min — Alpaca-compatible bar-open semantics, see module
+            # docstring).
             if ts.date().isoformat() != session_date:
                 continue
-            if ts > until_et:
+            bar_close = ts + BAR_DURATION
+            if bar_close > until_et:
                 continue
             out.append(bar)
         return out
