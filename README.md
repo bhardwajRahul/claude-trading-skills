@@ -195,7 +195,7 @@ The detailed catalog below is retained for quick reference. For a more navigable
 - **Scenario Analyzer** (`scenario-analyzer`)
   - Analyzes news headlines to build 18-month scenario projections with sector impacts and stock picks.
   - Dual-agent architecture: scenario-analyst for primary analysis, strategy-reviewer for second opinion.
-  - Generates comprehensive reports including 1st/2nd/3rd order effects, recommended tickers, and critical review.
+  - Generates comprehensive reports including 1st/2nd/3rd order effects, candidate tickers, and critical review.
   - No API key required - uses WebSearch for news gathering.
 
 - **Backtest Expert** (`backtest-expert`)
@@ -304,7 +304,7 @@ The detailed catalog below is retained for quick reference. For a more navigable
 - **Exposure Coach** (`exposure-coach`)
   - Synthesizes outputs from market-breadth-analyzer, uptrend-analyzer, macro-regime-detector, market-top-detector, ftd-detector, theme-detector, sector-analyst, and institutional-flow-tracker into a unified exposure decision.
   - Answers the core question: "How much capital should I commit to equities right now?" before any individual stock analysis.
-  - Generates a one-page Market Posture summary with exposure ceiling (0-100%), growth-vs-value bias, participation breadth assessment, and actionable recommendation (NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY).
+  - Generates a one-page Market Posture summary with exposure ceiling (0-100%), growth-vs-value bias, participation breadth assessment, and a posture review flag (NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY).
   - Accepts partial inputs — missing upstream files reduce confidence level but do not block execution.
   - FMP API key optional (needed only when institutional-flow-tracker data is included).
 

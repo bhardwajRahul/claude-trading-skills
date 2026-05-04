@@ -181,7 +181,7 @@ English README is available at [`README.md`](README.md).
 ### 戦略・リスク管理
 
 - **シナリオアナライザー** (`scenario-analyzer`)
-  - ニュースヘッドラインを入力として18ヶ月シナリオを分析。1次・2次・3次影響、推奨銘柄、レビューを含む包括的レポートを生成。
+  - ニュースヘッドラインを入力として18ヶ月シナリオを分析。1次・2次・3次影響、候補銘柄、レビューを含む包括的レポートを生成。
   - デュアルエージェント構成: scenario-analystで主分析、strategy-reviewerでセカンドオピニオンを取得。
   - APIキー不要 - WebSearchでニュース収集。
 
@@ -283,7 +283,7 @@ English README is available at [`README.md`](README.md).
 - **エクスポージャーコーチ** (`exposure-coach`)
   - market-breadth-analyzer、uptrend-analyzer、macro-regime-detector、market-top-detector、ftd-detector、theme-detector、sector-analyst、institutional-flow-tracker の出力を統合し、エクスポージャー決定を一元化。
   - 「今、株式にどれだけ資本を投入すべきか？」という核心的な問いに回答。
-  - エクスポージャー上限（0-100%）、グロース/バリュー傾斜、参加幅評価、行動推奨（NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY）を含む1ページのマーケットポスチャーサマリーを生成。
+  - エクスポージャー上限（0-100%）、グロース/バリュー傾斜、参加幅評価、ポスチャー用レビューフラグ（NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY）を含む1ページのマーケットポスチャーサマリーを生成。
   - 部分的な入力にも対応 — upstreamファイルが欠落してもconfidenceレベルが低下するだけで実行はブロックされない。
   - FMP APIキーは任意（institutional-flow-trackerデータ利用時のみ必要）。
 
@@ -304,7 +304,7 @@ English README is available at [`README.md`](README.md).
 - **IBD Distribution Day Monitor** (`ibd-distribution-day-monitor`)
   - QQQ/SPYに対するIBD式Distribution Day（終値0.2%以上下落＋出来高増加）を日次検出。25取引セッション失効・5%上昇による無効化を追跡。
   - `age_sessions` で各レコードを管理し、`d5/d15/d25` クラスタから NORMAL/CAUTION/HIGH/SEVERE のリスク判定を生成。
-  - TQQQ/QQQ向けエクスポージャ推奨を出力（TQQQは3倍レバレッジ特性により早めに縮小）。トレーリングストップも併せて提案。
+  - TQQQ/QQQ向けエクスポージャーレビュー用フラグを出力（TQQQは3倍レバレッジ特性により早めに縮小）。トレーリングストップ参考水準も併せて提示。
   - Market Top Detectorとの違い: 単一コンポーネント／ETF直結／TQQQ特性考慮。Market Top Detectorは6コンポーネント複合スコア。
   - FMP APIキーが必要。
 
