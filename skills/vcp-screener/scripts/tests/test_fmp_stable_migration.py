@@ -16,7 +16,7 @@ from fmp_client import FMPClient
 
 
 def _make_client():
-    return FMPClient(api_key="test_key")
+    return FMPClient(api_key="test_key")  # pragma: allowlist secret
 
 
 def _mock_response(status_code, json_payload, text=""):

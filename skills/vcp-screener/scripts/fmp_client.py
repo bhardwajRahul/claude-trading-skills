@@ -25,7 +25,11 @@ except ImportError:
     print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
 
-from _fmp_compat import v3_to_stable
+try:
+    from _fmp_compat import v3_to_stable
+except ModuleNotFoundError:  # loaded by file path (e.g. repo-level contract tests)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _fmp_compat import v3_to_stable
 
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
 
