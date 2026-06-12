@@ -43,6 +43,16 @@ python3 skills/earnings-trade-analyzer/scripts/analyze_earnings_trades.py \
   --output-dir reports/
 ```
 
+#### Degraded endpoint fallback for scheduled reviews
+
+If the analyzer reports a 404 or an implausible empty earnings calendar during a scheduled after-close/pre-market run, do not report "no earnings reactions" immediately. Verify with FMP's documented calendar endpoint and clearly label the result as an ungraded fallback:
+
+```bash
+curl "https://financialmodelingprep.com/api/v3/earning_calendar?from=YYYY-MM-DD&to=YYYY-MM-DD&apikey=$FMP_API_KEY"
+```
+
+Then optionally enrich returned US tickers with batched `/api/v3/quote/<symbols>` data to rank by same-day `changesPercentage`, market cap, and liquidity. Present these as **preliminary / ungraded reactions** because the 5-factor scorer did not run; do not assign A/B/C/D grades from the fallback alone.
+
 ### Step 2: Review Results
 
 1. Read the generated JSON and Markdown reports
