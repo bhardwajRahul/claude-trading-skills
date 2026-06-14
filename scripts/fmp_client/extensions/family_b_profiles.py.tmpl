@@ -49,7 +49,9 @@
             data = self._rate_limited_get(url, params)
             if data and isinstance(data, list) and data:
                 profile = data[0]
-                if isinstance(profile, dict) and "symbol" in profile:
+                if isinstance(profile, dict):
+                    # Preserve the prior lenient behavior: a profile that omits
+                    # "symbol" is still returned under the requested symbol.
                     self.cache[cache_key] = profile
-                    results[profile["symbol"]] = profile
+                    results[profile.get("symbol", symbol)] = profile
         return results
