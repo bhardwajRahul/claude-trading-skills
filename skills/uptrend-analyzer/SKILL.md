@@ -29,7 +29,7 @@ Unlike the Market Top Detector (API-based risk scorer), this skill uses free CSV
 
 ## Prerequisites
 
-- **Python 3.8+** with `pandas` and `requests` libraries
+- **Python 3.9+** with the `requests` library (CSV parsing uses the stdlib `csv`/`io` modules)
 - **Internet connection** to fetch CSV data from GitHub (no API key required)
 - No paid API subscriptions needed
 
