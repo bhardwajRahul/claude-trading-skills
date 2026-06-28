@@ -959,7 +959,7 @@ def generate_index_table_row(
     # logic. Escape pipes last so the cell stays single-column.
     short_desc = " ".join(short_desc.split())
     if len(short_desc) > 120:
-        short_desc = short_desc[:117] + "..."
+        short_desc = short_desc[:117].rsplit(" ", 1)[0].rstrip() + "..."
     short_desc = short_desc.replace("\\", "\\\\").replace("|", "\\|")
     return f"| [{title}]({link}){star} | {short_desc} | {badges} |"
 
@@ -1218,12 +1218,13 @@ def _compute_nav_orders(skill_dirs: list[Path], overwrite: bool) -> dict[str, in
     Shared by the write path and ``--check`` so expected output cannot diverge
     from what a real generation would write.
     """
+    _ = overwrite
     new_skills: list[str] = []
     for d in skill_dirs:
         if not d.is_dir() or not (d / "SKILL.md").exists():
             continue
         name = d.name
-        if name in HAND_WRITTEN and not overwrite:
+        if name in HAND_WRITTEN:
             continue
         new_skills.append(name)
     new_skills.sort()

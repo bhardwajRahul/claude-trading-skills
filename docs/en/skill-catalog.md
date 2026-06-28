@@ -259,6 +259,8 @@ A comprehensive catalog of all 55 Claude Trading Skills organized by category. B
 | Trading Skills Navigator | -- | -- | -- |
 | Trade Performance Coach | -- | -- | -- |
 | Weekly Performance Digest | -- | -- | -- |
+| Stockbee Episodic Pivot Analyzer | Optional | -- | -- |
 | Stockbee Momentum Burst Screener | Required | -- | -- |
+| Stockbee Setup Fluency Trainer | Optional | -- | -- |
 
 "--" means not required. "Optional" means functionality is enhanced but the skill works without it.

@@ -24,6 +24,8 @@ Operational workflow manifests for the solo-trader OS. Each workflow names the e
 | [`market-regime-daily`](#market-regime-daily) — Market Regime Daily | daily | 15 | no-api-basic | beginner |
 | [`monthly-performance-review`](#monthly-performance-review) — Monthly Performance Review | monthly | 90 | no-api-basic | intermediate |
 | [`multi-asset-opportunity-daily`](#multi-asset-opportunity-daily) — Multi-Asset Opportunity Daily | daily | 45 | mixed | intermediate |
+| [`stockbee-ep-daily`](#stockbee-ep-daily) — Stockbee EP Daily | daily | 35 | mixed | advanced |
+| [`stockbee-fluency-loop`](#stockbee-fluency-loop) — Stockbee Setup Fluency Loop | daily | 20 | no-api-basic | intermediate |
 | [`swing-opportunity-daily`](#swing-opportunity-daily) — Swing Opportunity Daily | daily | 35 | fmp-required | intermediate |
 | [`trade-memory-loop`](#trade-memory-loop) — Trade Memory Loop | ad-hoc | 30 | no-api-basic | beginner |
 
@@ -285,6 +287,143 @@ Operational workflow manifests for the solo-trader OS. Each workflow names the e
 - Confirm position sizing respects portfolio risk caps (per-position and per-sector).
 - For forex-related output, confirm research_only=true; never wire to a broker.
 - Confirm IDEA → ENTRY_READY transitions are explicit and reviewed.
+
+**Journal destination:** `trader-memory-core`
+
+---
+
+## Stockbee EP Daily {#stockbee-ep-daily}
+
+**`stockbee-ep-daily`** · daily · ~35 min · mixed · advanced
+
+**When to run:** Run on earnings/news-heavy days after the market-regime workflow allows new risk, or ad hoc when a game-changing catalyst appears. Use this workflow to classify Day 1 Episodic Pivot candidates and decide whether they are actionable today, delayed-EP watchlist names, or PEAD handoff candidates.
+
+**When NOT to run:** Do not run as a blind stock screener without catalyst inputs. Do not use it to bypass market-regime gates, chart validation, position sizing, or manual catalyst review.
+
+**Required skills:** `stockbee-episodic-pivot-analyzer`, `technical-analyst`, `position-sizer`, `trader-memory-core`
+
+**Optional skills:** `earnings-trade-analyzer`, `stockbee-momentum-burst-screener`, `pead-screener`, `theme-detector`, `breakout-trade-planner`
+
+**Prerequisite workflows (informational):**
+
+- `market-regime-daily` expects `exposure_decision` — New EP trades should still respect the market-regime exposure gate.
+
+**Artifacts:**
+
+| Artifact | Produced by step | Required | Downstream hints |
+|---|---|---|---|
+| `earnings_candidates` | 1 | no | — |
+| `momentum_burst_candidates` | 2 | no | — |
+| `episodic_pivot_candidates` | 3 | yes | — |
+| `pead_handoff_candidates` | 3 | no | `swing-opportunity-daily` |
+| `delayed_ep_watchlist` | 3 | no | — |
+| `validated_ep_setups` | 4 | yes | — |
+| `ep_position_sizing` | 5 | yes | — |
+| `ep_trade_plan` | 6 | no | — |
+| `ep_journal_entry` | 7 | yes | `trade-memory-loop` |
+
+**Steps:**
+
+**Step 1: Optional earnings candidate scan** (optional) → `earnings-trade-analyzer`
+
+- produces: `earnings_candidates`
+
+**Step 2: Optional momentum confirmation scan** (optional) → `stockbee-momentum-burst-screener`
+
+- produces: `momentum_burst_candidates`
+
+**Step 3: Analyze Day 1 Episodic Pivot candidates** (decision gate) → `stockbee-episodic-pivot-analyzer`
+
+- consumes: `earnings_candidates`, `momentum_burst_candidates`
+- produces: `episodic_pivot_candidates`, `pead_handoff_candidates`, `delayed_ep_watchlist`
+- **Decision:** Which candidates have a true game-changing catalyst plus price/volume confirmation? Separate ACTIONABLE_DAY1 from DELAYED_EP_WATCH and reject low-quality headline-only moves.
+
+**Step 4: Validate EP chart quality** (decision gate) → `technical-analyst`
+
+- consumes: `episodic_pivot_candidates`
+- produces: `validated_ep_setups`
+- **Decision:** Does the chart confirm a clean EP reaction with acceptable close quality, liquidity, and risk to the EP-day low?
+
+**Step 5: Calculate EP position size** → `position-sizer`
+
+- consumes: `validated_ep_setups`
+- produces: `ep_position_sizing`
+
+**Step 6: Build optional EP trade plan** (optional) → `breakout-trade-planner`
+
+- consumes: `validated_ep_setups`, `ep_position_sizing`
+- produces: `ep_trade_plan`
+
+**Step 7: Register EP thesis or watchlist entry** (decision gate) → `trader-memory-core`
+
+- consumes: `validated_ep_setups`, `ep_position_sizing`, `ep_trade_plan`
+- produces: `ep_journal_entry`
+- **Decision:** Which candidates deserve an active thesis, which belong on delayed EP / PEAD watch, and which should be ignored despite a high initial score?
+
+**Manual review:**
+
+- Confirm market-regime-daily allows new risk before acting.
+- Verify the catalyst manually; this workflow does not discover or validate news truth by itself.
+- Treat analyst-only and story-only EPs as lower quality unless price/volume confirmation is exceptional.
+- Use EP-day low as the default stop reference only if the distance is realistically sizeable.
+- Send overextended earnings/guidance EPs to PEAD monitoring instead of chasing Day 1.
+- All orders are placed manually at the broker; no auto-execution.
+
+**Journal destination:** `trader-memory-core`
+
+---
+
+## Stockbee Setup Fluency Loop {#stockbee-fluency-loop}
+
+**`stockbee-fluency-loop`** · daily · ~20 min · no-api-basic · intermediate
+
+**When to run:** After stockbee-momentum-burst-screener produces candidate reports, and again after 3/5 trading-day windows have matured. Builds a model book of Stockbee Momentum Burst examples so the trader can improve setup recognition.
+
+**When NOT to run:** Do not use as an execution workflow or signal service. Do not change trading rules from tiny samples; require enough matured examples and manual chart review before promoting or filtering a setup tag.
+
+**Required skills:** `stockbee-setup-fluency-trainer`
+
+**Optional skills:** `trader-memory-core`, `signal-postmortem`, `backtest-expert`
+
+**Artifacts:**
+
+| Artifact | Produced by step | Required | Downstream hints |
+|---|---|---|---|
+| `model_book_ingest` | 1 | yes | — |
+| `matured_setup_outcomes` | 2 | yes | — |
+| `setup_fluency_summary` | 3 | yes | `monthly-performance-review` |
+| `rule_candidates` | 3 | no | `monthly-performance-review` |
+| `accepted_lessons_log` | 4 | no | `monthly-performance-review` |
+
+**Steps:**
+
+**Step 1: Ingest latest Stockbee momentum burst candidates** → `stockbee-setup-fluency-trainer`
+
+- produces: `model_book_ingest`
+
+**Step 2: Update matured 3-day and 5-day outcomes** → `stockbee-setup-fluency-trainer`
+
+- consumes: `model_book_ingest`
+- produces: `matured_setup_outcomes`
+
+**Step 3: Summarize setup cohorts and rule candidates** (decision gate) → `stockbee-setup-fluency-trainer`
+
+- consumes: `matured_setup_outcomes`
+- produces: `setup_fluency_summary`, `rule_candidates`
+- **Decision:** Which setup tags have enough matured examples to promote, downgrade, or continue monitoring? Require representative chart review before changing trade rules.
+
+**Step 4: Log accepted lessons** (optional) (decision gate) → `trader-memory-core`
+
+- consumes: `setup_fluency_summary`, `rule_candidates`
+- produces: `accepted_lessons_log`
+- **Decision:** Which findings are accepted as operating-rule changes, and which remain journal-only observations pending more examples?
+
+**Manual review:**
+
+- Inspect representative winner and failure charts before accepting a rule change.
+- Separate evidence from execution decisions; this workflow records setup behavior, not actual P&L.
+- Keep sample-size thresholds explicit, especially when market regime changes.
+- Feed accepted lessons into monthly-performance-review rather than adding ad-hoc rules daily.
 
 **Journal destination:** `trader-memory-core`
 

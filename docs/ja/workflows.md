@@ -26,6 +26,8 @@ permalink: /ja/workflows/
 | [`market-regime-daily`](#market-regime-daily) — Market Regime Daily | daily | 15 | no-api-basic | beginner |
 | [`monthly-performance-review`](#monthly-performance-review) — Monthly Performance Review | monthly | 90 | no-api-basic | intermediate |
 | [`multi-asset-opportunity-daily`](#multi-asset-opportunity-daily) — Multi-Asset Opportunity Daily | daily | 45 | mixed | intermediate |
+| [`stockbee-ep-daily`](#stockbee-ep-daily) — Stockbee EP Daily | daily | 35 | mixed | advanced |
+| [`stockbee-fluency-loop`](#stockbee-fluency-loop) — Stockbee Setup Fluency Loop | daily | 20 | no-api-basic | intermediate |
 | [`swing-opportunity-daily`](#swing-opportunity-daily) — Swing Opportunity Daily | daily | 35 | fmp-required | intermediate |
 | [`trade-memory-loop`](#trade-memory-loop) — Trade Memory Loop | ad-hoc | 30 | no-api-basic | beginner |
 
@@ -287,6 +289,143 @@ permalink: /ja/workflows/
 - Confirm position sizing respects portfolio risk caps (per-position and per-sector).
 - For forex-related output, confirm research_only=true; never wire to a broker.
 - Confirm IDEA → ENTRY_READY transitions are explicit and reviewed.
+
+**Journal 出力先:** `trader-memory-core`
+
+---
+
+## Stockbee EP Daily {#stockbee-ep-daily}
+
+**`stockbee-ep-daily`** · daily · ~35 min · mixed · advanced
+
+**実行タイミング:** Run on earnings/news-heavy days after the market-regime workflow allows new risk, or ad hoc when a game-changing catalyst appears. Use this workflow to classify Day 1 Episodic Pivot candidates and decide whether they are actionable today, delayed-EP watchlist names, or PEAD handoff candidates.
+
+**実行してはいけないとき:** Do not run as a blind stock screener without catalyst inputs. Do not use it to bypass market-regime gates, chart validation, position sizing, or manual catalyst review.
+
+**必須スキル:** `stockbee-episodic-pivot-analyzer`, `technical-analyst`, `position-sizer`, `trader-memory-core`
+
+**任意スキル:** `earnings-trade-analyzer`, `stockbee-momentum-burst-screener`, `pead-screener`, `theme-detector`, `breakout-trade-planner`
+
+**前提ワークフロー（informational）:**
+
+- `market-regime-daily` が期待する artifact `exposure_decision` — New EP trades should still respect the market-regime exposure gate.
+
+**artifact 一覧:**
+
+| Artifact | 生成ステップ | 必須 | 下流ヒント |
+|---|---|---|---|
+| `earnings_candidates` | 1 | なし | — |
+| `momentum_burst_candidates` | 2 | なし | — |
+| `episodic_pivot_candidates` | 3 | あり | — |
+| `pead_handoff_candidates` | 3 | なし | `swing-opportunity-daily` |
+| `delayed_ep_watchlist` | 3 | なし | — |
+| `validated_ep_setups` | 4 | あり | — |
+| `ep_position_sizing` | 5 | あり | — |
+| `ep_trade_plan` | 6 | なし | — |
+| `ep_journal_entry` | 7 | あり | `trade-memory-loop` |
+
+**ステップ:**
+
+**ステップ 1: Optional earnings candidate scan** （任意） → `earnings-trade-analyzer`
+
+- produces: `earnings_candidates`
+
+**ステップ 2: Optional momentum confirmation scan** （任意） → `stockbee-momentum-burst-screener`
+
+- produces: `momentum_burst_candidates`
+
+**ステップ 3: Analyze Day 1 Episodic Pivot candidates** （判断ゲート） → `stockbee-episodic-pivot-analyzer`
+
+- consumes: `earnings_candidates`, `momentum_burst_candidates`
+- produces: `episodic_pivot_candidates`, `pead_handoff_candidates`, `delayed_ep_watchlist`
+- **判断:** Which candidates have a true game-changing catalyst plus price/volume confirmation? Separate ACTIONABLE_DAY1 from DELAYED_EP_WATCH and reject low-quality headline-only moves.
+
+**ステップ 4: Validate EP chart quality** （判断ゲート） → `technical-analyst`
+
+- consumes: `episodic_pivot_candidates`
+- produces: `validated_ep_setups`
+- **判断:** Does the chart confirm a clean EP reaction with acceptable close quality, liquidity, and risk to the EP-day low?
+
+**ステップ 5: Calculate EP position size** → `position-sizer`
+
+- consumes: `validated_ep_setups`
+- produces: `ep_position_sizing`
+
+**ステップ 6: Build optional EP trade plan** （任意） → `breakout-trade-planner`
+
+- consumes: `validated_ep_setups`, `ep_position_sizing`
+- produces: `ep_trade_plan`
+
+**ステップ 7: Register EP thesis or watchlist entry** （判断ゲート） → `trader-memory-core`
+
+- consumes: `validated_ep_setups`, `ep_position_sizing`, `ep_trade_plan`
+- produces: `ep_journal_entry`
+- **判断:** Which candidates deserve an active thesis, which belong on delayed EP / PEAD watch, and which should be ignored despite a high initial score?
+
+**手動レビュー:**
+
+- Confirm market-regime-daily allows new risk before acting.
+- Verify the catalyst manually; this workflow does not discover or validate news truth by itself.
+- Treat analyst-only and story-only EPs as lower quality unless price/volume confirmation is exceptional.
+- Use EP-day low as the default stop reference only if the distance is realistically sizeable.
+- Send overextended earnings/guidance EPs to PEAD monitoring instead of chasing Day 1.
+- All orders are placed manually at the broker; no auto-execution.
+
+**Journal 出力先:** `trader-memory-core`
+
+---
+
+## Stockbee Setup Fluency Loop {#stockbee-fluency-loop}
+
+**`stockbee-fluency-loop`** · daily · ~20 min · no-api-basic · intermediate
+
+**実行タイミング:** After stockbee-momentum-burst-screener produces candidate reports, and again after 3/5 trading-day windows have matured. Builds a model book of Stockbee Momentum Burst examples so the trader can improve setup recognition.
+
+**実行してはいけないとき:** Do not use as an execution workflow or signal service. Do not change trading rules from tiny samples; require enough matured examples and manual chart review before promoting or filtering a setup tag.
+
+**必須スキル:** `stockbee-setup-fluency-trainer`
+
+**任意スキル:** `trader-memory-core`, `signal-postmortem`, `backtest-expert`
+
+**artifact 一覧:**
+
+| Artifact | 生成ステップ | 必須 | 下流ヒント |
+|---|---|---|---|
+| `model_book_ingest` | 1 | あり | — |
+| `matured_setup_outcomes` | 2 | あり | — |
+| `setup_fluency_summary` | 3 | あり | `monthly-performance-review` |
+| `rule_candidates` | 3 | なし | `monthly-performance-review` |
+| `accepted_lessons_log` | 4 | なし | `monthly-performance-review` |
+
+**ステップ:**
+
+**ステップ 1: Ingest latest Stockbee momentum burst candidates** → `stockbee-setup-fluency-trainer`
+
+- produces: `model_book_ingest`
+
+**ステップ 2: Update matured 3-day and 5-day outcomes** → `stockbee-setup-fluency-trainer`
+
+- consumes: `model_book_ingest`
+- produces: `matured_setup_outcomes`
+
+**ステップ 3: Summarize setup cohorts and rule candidates** （判断ゲート） → `stockbee-setup-fluency-trainer`
+
+- consumes: `matured_setup_outcomes`
+- produces: `setup_fluency_summary`, `rule_candidates`
+- **判断:** Which setup tags have enough matured examples to promote, downgrade, or continue monitoring? Require representative chart review before changing trade rules.
+
+**ステップ 4: Log accepted lessons** （任意） （判断ゲート） → `trader-memory-core`
+
+- consumes: `setup_fluency_summary`, `rule_candidates`
+- produces: `accepted_lessons_log`
+- **判断:** Which findings are accepted as operating-rule changes, and which remain journal-only observations pending more examples?
+
+**手動レビュー:**
+
+- Inspect representative winner and failure charts before accepting a rule change.
+- Separate evidence from execution decisions; this workflow records setup behavior, not actual P&L.
+- Keep sample-size thresholds explicit, especially when market regime changes.
+- Feed accepted lessons into monthly-performance-review rather than adding ad-hoc rules daily.
 
 **Journal 出力先:** `trader-memory-core`
 
