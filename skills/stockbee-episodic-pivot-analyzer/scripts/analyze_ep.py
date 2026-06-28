@@ -192,11 +192,11 @@ class FMPClient:
         }
         data = self._get(self.HIST_URLS[0], params_stable)
         if isinstance(data, list) and data:
-            return normalize_bars(data)[:days]
+            return normalize_bars(data)[-days:]
 
         data = self._get(f"{self.HIST_URLS[1]}/{symbol}", {"timeseries": days})
         if isinstance(data, dict) and isinstance(data.get("historical"), list):
-            return normalize_bars(data["historical"])[:days]
+            return normalize_bars(data["historical"])[-days:]
         return []
 
     def get_profile(self, symbol: str) -> dict[str, Any]:

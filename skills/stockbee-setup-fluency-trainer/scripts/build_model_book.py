@@ -445,6 +445,33 @@ def make_record(
     }
 
 
+def is_studyable_candidate(candidate: dict[str, Any]) -> tuple[bool, str | None]:
+    symbol = normalize_symbol(candidate.get("symbol"))
+    setup_date = str(candidate.get("date") or candidate.get("setup_date") or "")[:10]
+    if not symbol:
+        return False, "missing_symbol"
+    if len(setup_date) != 10:
+        return False, "missing_setup_date"
+    return True, None
+
+
+def make_studyable_records(
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    records = []
+    stats = {"candidates_loaded": len(candidates), "studyable": 0, "skipped": 0}
+    for candidate in candidates:
+        studyable, reason = is_studyable_candidate(candidate)
+        if not studyable:
+            stats["skipped"] += 1
+            key = f"skipped_{reason or 'unknown'}"
+            stats[key] = stats.get(key, 0) + 1
+            continue
+        records.append(make_record(candidate))
+        stats["studyable"] += 1
+    return records, stats
+
+
 def future_bars_after_setup(bars: list[Bar], setup_date: str) -> list[Bar]:
     setup_dt = parse_date(setup_date)
     return [bar for bar in bars if parse_date(bar.date) > setup_dt]
@@ -732,6 +759,15 @@ def write_markdown_report(payload: dict[str, Any], output_dir: str | Path, prefi
         stats = payload["ingest"]
         lines.append("## Ingest")
         lines.append("")
+        lines.append(f"- Candidates loaded: {stats.get('candidates_loaded', 0)}")
+        lines.append(f"- Studyable records: {stats.get('studyable', 0)}")
+        lines.append(f"- Skipped: {stats.get('skipped', 0)}")
+        if stats.get("skipped_missing_setup_date"):
+            lines.append(
+                f"- Skipped missing setup date: {stats.get('skipped_missing_setup_date', 0)}"
+            )
+        if stats.get("skipped_missing_symbol"):
+            lines.append(f"- Skipped missing symbol: {stats.get('skipped_missing_symbol', 0)}")
         lines.append(f"- Inserted: {stats.get('inserted', 0)}")
         lines.append(f"- Updated: {stats.get('updated', 0)}")
         lines.append(f"- Total model-book records: {stats.get('total', 0)}")
@@ -822,9 +858,10 @@ def parse_horizons(value: str) -> tuple[int, ...]:
 
 def command_ingest(args: argparse.Namespace) -> int:
     candidates = load_screener_candidates(args.screener_json, include_rejects=args.include_rejects)
-    new_records = [make_record(c) for c in candidates]
+    new_records, ingest_stats = make_studyable_records(candidates)
     existing = load_model_book(args.model_book)
-    records, stats = upsert_records(existing, new_records)
+    records, upsert_stats = upsert_records(existing, new_records)
+    stats = {**ingest_stats, **upsert_stats}
     save_model_book(args.model_book, records)
 
     payload = {
@@ -839,7 +876,10 @@ def command_ingest(args: argparse.Namespace) -> int:
     }
     json_path = write_json_report(payload, args.output_dir, "stockbee_setup_fluency_ingest")
     md_path = write_markdown_report(payload, args.output_dir, "stockbee_setup_fluency_ingest")
-    print(f"Ingested {len(candidates)} candidates into {args.model_book}")
+    print(
+        f"Ingested {stats.get('studyable', 0)} studyable candidates into {args.model_book} "
+        f"({stats.get('skipped', 0)} skipped)"
+    )
     print(f"JSON Report: {json_path}")
     print(f"Markdown Report: {md_path}")
     return 0

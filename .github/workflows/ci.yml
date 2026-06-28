@@ -145,6 +145,20 @@ jobs:
           --cov-report=term-missing
           --cov-append
 
+      - name: Test stockbee-episodic-pivot-analyzer
+        run: >
+          python -m pytest skills/stockbee-episodic-pivot-analyzer/scripts/tests/ -v
+          --cov=skills/stockbee-episodic-pivot-analyzer/scripts
+          --cov-report=term-missing
+          --cov-append
+
+      - name: Test stockbee-setup-fluency-trainer
+        run: >
+          python -m pytest skills/stockbee-setup-fluency-trainer/scripts/tests/ -v
+          --cov=skills/stockbee-setup-fluency-trainer/scripts
+          --cov-report=term-missing
+          --cov-append
+
       - name: Test uptrend-analyzer
         run: >
           python -m pytest skills/uptrend-analyzer/scripts/tests/ -v

@@ -10,7 +10,9 @@ from build_model_book import (  # noqa: E402
     classify_outcome,
     load_model_book,
     load_prices_json,
+    load_screener_candidates,
     make_record,
+    make_studyable_records,
     save_model_book,
     summarize_model_book,
     update_record_outcomes,
@@ -53,6 +55,35 @@ def test_make_record_derives_model_book_fields_and_tags():
     assert "tight_base" in record["setup_tags"]
     assert "controlled_3_to_20_day_base" in record["setup_tags"]
     assert "volume_dry_up" in record["setup_tags"]
+
+
+def test_include_rejects_skips_skeleton_rejects_without_date(tmp_path):
+    path = tmp_path / "screener.json"
+    path.write_text(
+        json.dumps(
+            {
+                "metadata": {"source": "test"},
+                "candidates": [
+                    candidate(),
+                    {
+                        "symbol": "SKEL",
+                        "state": "REJECT",
+                        "reject_reasons": ["insufficient_history"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    candidates = load_screener_candidates([path], include_rejects=True)
+    records, stats = make_studyable_records(candidates)
+
+    assert len(candidates) == 2
+    assert len(records) == 1
+    assert stats["studyable"] == 1
+    assert stats["skipped"] == 1
+    assert stats["skipped_missing_setup_date"] == 1
 
 
 def test_update_outcomes_calculates_forward_return_mfe_mae_and_strong_winner():

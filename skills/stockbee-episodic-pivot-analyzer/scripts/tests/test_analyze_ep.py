@@ -6,6 +6,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from analyze_ep import (  # noqa: E402
+    FMPClient,
     analyze_candidate,
     classify_catalyst,
     events_from_earnings_json,
@@ -73,6 +74,38 @@ def test_price_stats_compute_gap_volume_and_risk():
     assert stats.volume_ratio_50 and stats.volume_ratio_50 > 5
     assert stats.close_location_pct and stats.close_location_pct > 80
     assert stats.risk_pct_to_low and stats.risk_pct_to_low < 10
+
+
+def test_fmp_historical_prices_keep_latest_stable_bars(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return [
+                {
+                    "date": f"2026-01-{day:02d}",
+                    "open": day,
+                    "high": day,
+                    "low": day,
+                    "close": day,
+                    "volume": day * 1000,
+                }
+                for day in range(1, 11)
+            ]
+
+    class FakeSession:
+        headers = {}
+
+        def get(self, url, params, timeout):  # noqa: ARG002
+            return FakeResponse()
+
+    monkeypatch.setenv("FMP_API_KEY", "test-key")
+    client = FMPClient(api_key=None, max_api_calls=10)
+    client.session = FakeSession()
+
+    bars = client.get_historical_prices("ABC", days=3)
+
+    assert [bar["date"] for bar in bars] == ["2026-01-08", "2026-01-09", "2026-01-10"]
 
 
 def test_high_quality_ep_is_actionable_day1():
