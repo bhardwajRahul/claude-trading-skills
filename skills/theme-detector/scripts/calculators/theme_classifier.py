@@ -83,6 +83,8 @@ def classify_themes(
                     "sector_weights": sector_weights,
                     "proxy_etfs": theme_def.get("proxy_etfs", []),
                     "static_stocks": theme_def.get("static_stocks", []),
+                    "matching_keyword_count": len(keywords),
+                    "min_matching_industries": min_matches,
                     "theme_origin": "seed",
                     "name_confidence": "high",
                 }

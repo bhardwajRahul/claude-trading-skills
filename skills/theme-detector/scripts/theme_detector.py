@@ -59,6 +59,7 @@ from theme_history import (
     resolve_run_date,
     save_history,
 )
+from theme_matcher import calculate_theme_match, load_narrative_scores
 
 # Heavy-dependency modules (pandas/numpy/yfinance/finvizfinance) are imported
 # lazily inside main() to allow lightweight helpers like _get_representative_stocks
@@ -308,6 +309,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional JSON/JSONL/CSV stock leadership scan rows or hits",
     )
     parser.add_argument(
+        "--narrative-scores",
+        default=None,
+        help="Optional JSON map of theme names to offline narrative scores",
+    )
+    parser.add_argument(
         "--history-file",
         default=None,
         help="Theme history JSON path (default: <output-dir>/theme_detector_history.json)",
@@ -498,6 +504,33 @@ def _coverage_penalties(
     return penalties
 
 
+def _legacy_theme_priority(theme: dict) -> float:
+    """Legacy max-themes priority from theme size and industry strength."""
+    industries = theme.get("matching_industries", [])
+    n_industries = len(industries)
+    avg_strength = sum(abs(ind.get("weighted_return", 0)) for ind in industries) / max(
+        len(industries), 1
+    )
+    size_norm = min(n_industries / 10.0, 1.0)
+    strength_norm = min(avg_strength / 30.0, 1.0)
+    return size_norm * 0.5 + strength_norm * 0.5
+
+
+def _theme_selection_priority(theme: dict, match_detail: dict | None = None) -> float:
+    """Select max-themes candidates without dropping high-quality matches."""
+    legacy_priority = _legacy_theme_priority(theme)
+    if not match_detail:
+        return legacy_priority
+
+    match_score = match_detail.get("theme_match_score")
+    match_coverage = match_detail.get("theme_match_coverage", 0.0) or 0.0
+    if match_score is None or match_coverage < 0.50:
+        return legacy_priority
+
+    match_priority = max(0.0, min(float(match_score) / 100.0, 1.0))
+    return max(legacy_priority, match_priority)
+
+
 # ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
@@ -603,20 +636,8 @@ def main():
         metadata["data_sources"]["discovered_themes"] = len(discovered)
         print(f"  Discovered {len(discovered)} new themes", file=sys.stderr)
 
-    # Step 3.9: Limit to max_themes using composite priority (size + strength)
-    def _theme_priority(t):
-        inds = t.get("matching_industries", [])
-        n_industries = len(inds)
-        avg_strength = sum(abs(ind.get("weighted_return", 0)) for ind in inds) / max(len(inds), 1)
-        size_norm = min(n_industries / 10.0, 1.0)
-        strength_norm = min(avg_strength / 30.0, 1.0)
-        return size_norm * 0.5 + strength_norm * 0.5
-
-    themes.sort(key=_theme_priority, reverse=True)
-    themes = themes[: args.max_themes]
-
     # -----------------------------------------------------------------------
-    # Step 3.95: Load stock leadership scan hits
+    # Step 3.8: Load stock leadership and narrative evidence before truncation
     # -----------------------------------------------------------------------
     scan_hits = []
     scan_hits_available = args.scan_hits is not None
@@ -634,7 +655,52 @@ def main():
             "rows": 0,
             "hits": 0,
             "skipped_rows": 0,
+            "skipped_date_rows": 0,
         }
+
+    narrative_scores = None
+    if args.narrative_scores:
+        print(f"Loading narrative scores from {args.narrative_scores}...", file=sys.stderr)
+        narrative_scores = load_narrative_scores(args.narrative_scores)
+        metadata["data_sources"]["narrative_scores"] = {
+            "path": args.narrative_scores,
+            "themes": len(narrative_scores),
+        }
+    else:
+        metadata["data_sources"]["narrative_scores"] = {"path": None, "themes": 0}
+
+    scanner = ETFScanner(fmp_api_key=args.fmp_api_key)
+
+    preselection_etfs = sorted(
+        {etf for theme in themes for etf in theme.get("proxy_etfs", []) if etf}
+    )
+    print("Fetching preliminary ETF volume data for theme selection...", file=sys.stderr)
+    etf_volume_map: dict[str, dict] = scanner.batch_etf_volume_ratios(preselection_etfs)
+    metadata["data_sources"]["preselection_etf_volume"] = len(etf_volume_map)
+
+    preselection_matches = {
+        id(theme): calculate_theme_match(
+            theme,
+            scan_hits,
+            etf_volume_map,
+            scan_hits_available,
+            narrative_scores=narrative_scores,
+        )
+        for theme in themes
+    }
+
+    # Step 3.9: Limit to max_themes using legacy priority plus match evidence.
+    candidate_theme_count = len(themes)
+    themes.sort(
+        key=lambda theme: _theme_selection_priority(theme, preselection_matches.get(id(theme))),
+        reverse=True,
+    )
+    themes = themes[: args.max_themes]
+    metadata["data_sources"]["theme_selection"] = {
+        "candidate_themes": candidate_theme_count,
+        "selected_themes": len(themes),
+        "uses_match_evidence": True,
+    }
 
     leadership_by_theme = aggregate_leadership(themes, scan_hits, history)
 
@@ -691,7 +757,6 @@ def main():
     # Step 5: Batch fetch stock metrics (yfinance)
     # -----------------------------------------------------------------------
     stock_metrics_map: dict[str, dict] = {}
-    scanner = ETFScanner(fmp_api_key=args.fmp_api_key)
 
     if all_symbols_list:
         print(f"Batch downloading {len(all_symbols_list)} stocks...", file=sys.stderr)
@@ -705,14 +770,15 @@ def main():
     # -----------------------------------------------------------------------
     # Step 6: Fetch ETF volume ratios for each theme's proxy ETFs
     # -----------------------------------------------------------------------
-    print("Fetching ETF volume data...", file=sys.stderr)
-    etf_volume_map: dict[str, dict] = {}
     all_etfs = set()
     for theme in themes:
         for etf in theme.get("proxy_etfs", []):
             all_etfs.add(etf)
 
-    etf_volume_map = scanner.batch_etf_volume_ratios(sorted(all_etfs))
+    missing_etfs = sorted(etf for etf in all_etfs if etf not in etf_volume_map)
+    if missing_etfs:
+        print("Fetching ETF volume data...", file=sys.stderr)
+        etf_volume_map.update(scanner.batch_etf_volume_ratios(missing_etfs))
 
     metadata["data_sources"]["etf_volume"] = len(etf_volume_map)
 
@@ -806,6 +872,19 @@ def main():
         leadership_score = leadership.get("leadership_score")
         heat = blend_theme_heat(base_heat, leadership_score)
         history_metrics = compute_history_metrics(history, theme_name, run_date, heat)
+        theme_match = calculate_theme_match(
+            theme,
+            scan_hits,
+            etf_volume_map,
+            scan_hits_available,
+            narrative_scores=narrative_scores,
+        )
+        theme_match_score = theme_match.get("theme_match_score")
+        theme_rank_score = (
+            round(0.75 * heat + 0.25 * theme_match_score, 2)
+            if theme_match_score is not None
+            else round(heat, 2)
+        )
 
         heat_breakdown = {
             "momentum_strength": _round_optional(momentum),
@@ -927,12 +1006,38 @@ def main():
             "leadership_coverage": leadership.get("leadership_coverage", 0.0),
             "leadership_counts": leadership.get("leadership_counts", {}),
             "leader_symbols": leadership.get("leader_symbols", []),
+            "leader_candidates": leadership.get("leader_candidates", []),
+            "fresh_leadership_symbols": leadership.get("fresh_leadership_symbols", []),
+            "extended_symbols": leadership.get("extended_symbols", []),
+            "theme_match_score": theme_match_score,
+            "theme_match_components": theme_match.get("theme_match_components", {}),
+            "theme_match_coverage": theme_match.get("theme_match_coverage", 0.0),
+            "theme_match_missing_components": theme_match.get("theme_match_missing_components", []),
+            "static_stock_confirmation": theme_match.get("static_stock_confirmation", {}),
+            "proxy_etf_confirmation": theme_match.get("proxy_etf_confirmation", {}),
+            "theme_rank_score": theme_rank_score,
             "history_metrics": history_metrics,
         }
         scored_themes.append(scored_theme)
 
-    # Sort by heat descending
-    scored_themes.sort(key=lambda t: t["heat"], reverse=True)
+    # Preserve legacy heat ordering while exposing explicit match-quality ranks.
+    heat_sorted = sorted(scored_themes, key=lambda t: t["heat"], reverse=True)
+    for rank, theme in enumerate(heat_sorted, start=1):
+        theme["heat_rank"] = rank
+
+    match_sorted = sorted(
+        scored_themes,
+        key=lambda t: (
+            t.get("theme_match_score") is not None,
+            t.get("theme_match_score") or -1.0,
+            t.get("theme_rank_score", t.get("heat", 0)),
+        ),
+        reverse=True,
+    )
+    for rank, theme in enumerate(match_sorted, start=1):
+        theme["theme_match_rank"] = rank
+
+    scored_themes = heat_sorted
 
     # -----------------------------------------------------------------------
     # Step 9: Generate reports

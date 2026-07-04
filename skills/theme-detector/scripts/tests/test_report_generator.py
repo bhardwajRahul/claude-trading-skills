@@ -209,6 +209,7 @@ class TestGenerateJsonReport:
         assert "all" in themes
         assert "bullish" in themes
         assert "bearish" in themes
+        assert "match_ranked" in themes
         assert len(themes["all"]) == 3
         assert len(themes["bullish"]) == 2
         assert len(themes["bearish"]) == 1
@@ -217,6 +218,32 @@ class TestGenerateJsonReport:
         bullish = sample_json_report["themes"]["bullish"]
         heats = [t["heat"] for t in bullish]
         assert heats == sorted(heats, reverse=True)
+
+    def test_match_ranked_preserves_separate_consumer_rank(self, sample_industry_rankings):
+        themes = [
+            {
+                "name": "Higher Heat",
+                "direction": "bullish",
+                "heat": 90.0,
+                "theme_match_score": 40.0,
+            },
+            {
+                "name": "Higher Match",
+                "direction": "bullish",
+                "heat": 70.0,
+                "theme_match_score": 95.0,
+            },
+        ]
+        report = generate_json_report(themes, sample_industry_rankings, {}, {"data_sources": {}})
+
+        assert [theme["name"] for theme in report["themes"]["all"]] == [
+            "Higher Heat",
+            "Higher Match",
+        ]
+        assert [theme["name"] for theme in report["themes"]["match_ranked"]] == [
+            "Higher Match",
+            "Higher Heat",
+        ]
 
     def test_data_quality_ok(self, sample_json_report):
         dq = sample_json_report["data_quality"]

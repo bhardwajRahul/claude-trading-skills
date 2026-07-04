@@ -418,6 +418,8 @@ class TestThemeDetectorE2E:
 
     def test_max_themes_applied_after_discover(self):
         """max_themes limits seed+discovered combined total."""
+        from theme_detector import _theme_selection_priority
+
         raw = [
             _make_raw_industry("Semiconductors", "Technology", 5.0, 12.0, 25.0),
             _make_raw_industry("Software - Application", "Technology", 4.0, 10.0, 20.0),
@@ -445,16 +447,38 @@ class TestThemeDetectorE2E:
         discovered = discover_themes(ranked, matched, themes, top_n=30)
         themes.extend(discovered)
 
-        # Apply max_themes=2 with priority sort
-        def _priority(t):
-            inds = t.get("matching_industries", [])
-            n = len(inds)
-            avg_s = sum(abs(i.get("weighted_return", 0)) for i in inds) / max(n, 1)
-            return min(n / 10, 1) * 0.5 + min(avg_s / 30, 1) * 0.5
-
-        themes.sort(key=_priority, reverse=True)
+        # Apply max_themes=2 with the production selection priority.
+        themes.sort(key=lambda theme: _theme_selection_priority(theme, None), reverse=True)
         themes = themes[:2]
         assert len(themes) <= 2
+
+    def test_theme_selection_priority_keeps_strong_match_evidence(self):
+        """A strong stock/ETF/narrative match can survive max_themes truncation."""
+        from theme_detector import _theme_selection_priority
+
+        broad_theme = {
+            "theme_name": "Broad Software",
+            "matching_industries": [
+                {"name": "Software - Application", "weighted_return": 18.0},
+                {"name": "Software - Infrastructure", "weighted_return": 17.0},
+                {"name": "Information Technology Services", "weighted_return": 16.0},
+            ],
+        }
+        narrow_confirmed = {
+            "theme_name": "Cybersecurity",
+            "matching_industries": [{"name": "Software - Infrastructure", "weighted_return": 8.0}],
+        }
+
+        ranked = sorted(
+            [
+                (broad_theme, {"theme_match_score": 45.0, "theme_match_coverage": 0.6}),
+                (narrow_confirmed, {"theme_match_score": 92.0, "theme_match_coverage": 0.9}),
+            ],
+            key=lambda item: _theme_selection_priority(item[0], item[1]),
+            reverse=True,
+        )
+
+        assert ranked[0][0]["theme_name"] == "Cybersecurity"
 
     def test_stock_details_in_scored_theme_and_report(self):
         """stock_details flows through to scored_theme and into markdown."""

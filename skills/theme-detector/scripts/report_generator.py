@@ -35,6 +35,15 @@ def generate_json_report(
     # Sort by heat descending within each group
     bullish.sort(key=lambda t: t.get("heat", 0), reverse=True)
     bearish.sort(key=lambda t: t.get("heat", 0), reverse=True)
+    match_ranked = sorted(
+        themes,
+        key=lambda t: (
+            t.get("theme_match_score") is not None,
+            t.get("theme_match_score") or -1.0,
+            t.get("theme_rank_score", t.get("heat", 0)),
+        ),
+        reverse=True,
+    )
 
     # Data quality flags
     data_quality = _assess_data_quality(themes, industry_rankings, sector_uptrend, metadata)
@@ -56,6 +65,7 @@ def generate_json_report(
             "all": themes,
             "bullish": bullish,
             "bearish": bearish,
+            "match_ranked": match_ranked,
         },
         "industry_rankings": industry_rankings,
         "sector_uptrend": sector_uptrend,
@@ -110,16 +120,23 @@ def generate_markdown_report(json_data: dict, top_n_detail: int = 3) -> str:
         lines.append("**WARNING:** No themes detected. Check data sources.")
         lines.append("")
     else:
-        lines.append("| Theme | Origin | Direction | Heat | Maturity | Stage | Confidence |")
-        lines.append("|-------|--------|-----------|------|----------|-------|------------|")
+        lines.append(
+            "| Theme | Origin | Direction | Heat | Match | Maturity | Stage | Confidence |"
+        )
+        lines.append(
+            "|-------|--------|-----------|------|-------|----------|-------|------------|"
+        )
         for t in all_themes:
             heat_bar = _heat_bar(t.get("heat", 0))
             origin = _origin_label(t.get("theme_origin", "seed"))
+            match = t.get("theme_match_score")
+            match_str = "N/A" if match is None else f"{match:.1f}"
             lines.append(
                 f"| {t.get('name', 'N/A')} "
                 f"| {origin} "
                 f"| {_direction_label(t.get('direction'))} "
                 f"| {heat_bar} {t.get('heat', 0):.1f} "
+                f"| {match_str} "
                 f"| {t.get('maturity', 0):.1f} "
                 f"| {t.get('stage', 'N/A')} "
                 f"| {t.get('confidence', 'N/A')} |"
@@ -505,6 +522,7 @@ def _build_leadership_evidence(themes: list[dict]) -> list[dict]:
                 "high_rs_count": counts.get("high_rs", 0),
                 "leadership_score": theme.get("leadership_score"),
                 "leader_symbols": theme.get("leader_symbols", []),
+                "leader_candidates": theme.get("leader_candidates", []),
             }
         )
     rows.sort(
@@ -553,13 +571,22 @@ def _add_leadership_evidence(lines: list[str], evidence: list[dict]) -> None:
         lines.append("")
         return
     lines.append(
-        "| Theme | 5D+20% | EP9M | Range Expansion | New Highs | High RS | Score | Leaders |"
+        "| Theme | 5D+20% | EP9M | Range Expansion | New Highs | High RS | Score | Top Candidate Evidence |"
     )
     lines.append(
-        "|-------|--------|------|-----------------|-----------|---------|-------|---------|"
+        "|-------|--------|------|-----------------|-----------|---------|-------|------------------------|"
     )
     for row in evidence:
-        leaders = ", ".join(row.get("leader_symbols", [])[:8]) or "N/A"
+        candidates = row.get("leader_candidates", [])
+        if candidates:
+            leaders = ", ".join(
+                f"{candidate.get('symbol')} "
+                f"({candidate.get('leader_score', 0):.1f}, "
+                f"cov {candidate.get('leader_score_coverage', 0):.0%})"
+                for candidate in candidates[:5]
+            )
+        else:
+            leaders = ", ".join(row.get("leader_symbols", [])[:8]) or "N/A"
         score = row.get("leadership_score")
         score_str = "N/A" if score is None else f"{score:.1f}"
         lines.append(
@@ -712,6 +739,8 @@ def _add_theme_details(lines: list[str], themes: list[dict]) -> None:
             lines.append(f"- **Base Heat:** {t.get('base_heat', 0):.1f}/100")
         if t.get("leadership_score") is not None:
             lines.append(f"- **Leadership Score:** {t.get('leadership_score', 0):.1f}/100")
+        if t.get("theme_match_score") is not None:
+            lines.append(f"- **Theme Match Score:** {t.get('theme_match_score', 0):.1f}/100")
         lines.append(f"- **Maturity:** {t.get('maturity', 0):.1f}/100")
         lines.append(f"- **Stage:** {t.get('stage', 'N/A')}")
         lines.append(f"- **Confidence:** {t.get('confidence', 'N/A')}")
@@ -724,6 +753,21 @@ def _add_theme_details(lines: list[str], themes: list[dict]) -> None:
             f"Leadership {t.get('leadership_coverage', 0):.0%}"
         )
         lines.append("")
+
+        candidates = t.get("leader_candidates", [])
+        if candidates:
+            lines.append("**Leader Candidate Evidence:**")
+            lines.append("")
+            for candidate in candidates[:5]:
+                scan_types = ", ".join(candidate.get("scan_types", []))
+                risk_bucket = candidate.get("risk_bucket", "unknown")
+                lines.append(
+                    f"- {candidate.get('symbol')}: "
+                    f"score {candidate.get('leader_score', 0):.1f}, "
+                    f"coverage {candidate.get('leader_score_coverage', 0):.0%}, "
+                    f"signals {scan_types or 'N/A'}, risk {risk_bucket}"
+                )
+            lines.append("")
 
         # Divergence alert (shown before heat breakdown for visibility)
         div = t.get("divergence")

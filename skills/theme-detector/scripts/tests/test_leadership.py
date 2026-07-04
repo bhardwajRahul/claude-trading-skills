@@ -3,8 +3,10 @@
 import json
 
 from leadership import (
+    ScanHit,
     aggregate_leadership,
     blend_theme_heat,
+    calculate_leader_candidates,
     calculate_leadership_score,
     detect_scan_hits_from_row,
     load_scan_hits,
@@ -35,6 +37,17 @@ def test_raw_row_expands_to_multiple_scan_hits():
         "new_high",
         "high_rs",
     }
+    assert all(hit.rs_rating == 95 for hit in hits)
+
+
+def test_relative_strength_alias_normalized_for_high_rs():
+    hits = detect_scan_hits_from_row(
+        {"date": "2026-07-04", "symbol": "CRWD", "relative_strength": 0.96},
+        "2026-07-04",
+    )
+
+    assert [hit.scan_type for hit in hits] == ["high_rs"]
+    assert hits[0].rs_rating == 96.0
 
 
 def test_load_scan_hits_accepts_prelabeled_json(tmp_path):
@@ -196,3 +209,90 @@ def test_leadership_weights_distinguish_sparse_evidence():
     assert high_rs_only < five_day_only < all_once
     assert blend_theme_heat(70.0, high_rs_only) == 70.0
     assert blend_theme_heat(70.0, all_once) == 71.5
+
+
+def test_leader_candidates_rank_abnormal_evidence_not_market_cap():
+    hits = [
+        ScanHit(
+            date="2026-07-04",
+            symbol="MEGA",
+            scan_type="high_rs",
+            relative_volume=1.1,
+            return_5d=3.0,
+            atr_expansion=1.0,
+            close_location=0.55,
+            rs_rating=82.0,
+            dollar_volume=500_000_000,
+            market_cap=500_000_000_000,
+        ),
+        ScanHit(
+            date="2026-07-04",
+            symbol="SMID",
+            scan_type="ep9m",
+            relative_volume=3.0,
+            return_5d=18.0,
+            atr_expansion=1.9,
+            close_location=0.92,
+            rs_rating=96.0,
+            dollar_volume=30_000_000,
+            market_cap=3_000_000_000,
+        ),
+    ]
+
+    candidates = calculate_leader_candidates(hits)
+
+    assert candidates[0]["symbol"] == "SMID"
+    assert candidates[0]["risk_bucket"] == "mid"
+    assert candidates[1]["symbol"] == "MEGA"
+    assert candidates[1]["risk_bucket"] == "mega"
+    assert candidates[0]["leader_score"] > candidates[1]["leader_score"]
+
+
+def test_leader_candidates_do_not_overstate_sparse_high_rs_only():
+    candidates = calculate_leader_candidates(
+        [
+            ScanHit(
+                date="2026-07-04",
+                symbol="RS",
+                scan_type="high_rs",
+                rs_rating=95.0,
+            ),
+            ScanHit(
+                date="2026-07-04",
+                symbol="FULL",
+                scan_type="ep9m",
+                relative_volume=3.0,
+                return_5d=18.0,
+                atr_expansion=1.8,
+                close_location=0.9,
+                rs_rating=95.0,
+                dollar_volume=30_000_000,
+            ),
+        ]
+    )
+
+    by_symbol = {candidate["symbol"]: candidate for candidate in candidates}
+
+    assert by_symbol["RS"]["leader_score"] == 9.5
+    assert by_symbol["RS"]["leader_score_coverage"] == 0.1
+    assert by_symbol["FULL"]["leader_score"] > by_symbol["RS"]["leader_score"]
+
+
+def test_leadership_aggregation_exposes_fresh_and_extended_symbols():
+    themes = [
+        {
+            "theme_name": "AI & Semiconductors",
+            "matching_industries": [{"name": "Semiconductors"}],
+            "static_stocks": ["NVDA"],
+        }
+    ]
+    hits = [
+        ScanHit(date="2026-07-04", symbol="NVDA", scan_type="ep9m", return_5d=10),
+        ScanHit(date="2026-07-04", symbol="NVDA", scan_type="five_day_20pct", return_5d=22),
+    ]
+
+    evidence = aggregate_leadership(themes, hits, history={})["AI & Semiconductors"]
+
+    assert evidence["fresh_leadership_symbols"] == ["NVDA"]
+    assert evidence["extended_symbols"] == ["NVDA"]
+    assert evidence["leader_candidates"][0]["is_extended"] is True

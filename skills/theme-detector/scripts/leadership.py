@@ -36,6 +36,8 @@ class ScanHit:
     dollar_volume: Optional[float] = None
     close_location: Optional[float] = None
     atr_expansion: Optional[float] = None
+    rs_rating: Optional[float] = None
+    market_cap: Optional[float] = None
     close: Optional[float] = None
     industry: Optional[str] = None
     sector: Optional[str] = None
@@ -116,11 +118,24 @@ def aggregate_leadership(
             score = None
             coverage = 0.0
 
+        leader_candidates = calculate_leader_candidates(hits)
+
         result[name] = {
             "leadership_score": score,
             "leadership_coverage": coverage,
             "leadership_counts": counts,
             "leader_symbols": sorted({hit.symbol for hit in hits}),
+            "leader_candidates": leader_candidates,
+            "fresh_leadership_symbols": [
+                candidate["symbol"]
+                for candidate in leader_candidates
+                if set(candidate.get("scan_types", [])) & {"ep9m", "range_expansion", "new_high"}
+            ],
+            "extended_symbols": [
+                candidate["symbol"]
+                for candidate in leader_candidates
+                if candidate.get("is_extended")
+            ],
             "scan_hits": [hit.to_dict() for hit in hits],
         }
 
@@ -145,6 +160,38 @@ def blend_theme_heat(base_heat: float, leadership_score: Optional[float]) -> flo
         return base_heat
     blended = 0.70 * base_heat + 0.30 * leadership_score
     return round(max(base_heat, blended), 2)
+
+
+def calculate_leader_candidates(scan_hits: list[ScanHit]) -> list[dict]:
+    """Build one ranked leadership candidate row per symbol."""
+    by_symbol: dict[str, list[ScanHit]] = {}
+    for hit in scan_hits:
+        by_symbol.setdefault(hit.symbol, []).append(hit)
+
+    candidates = []
+    for symbol, hits in by_symbol.items():
+        metrics = _merge_hit_metrics(hits)
+        score, components, coverage = _leader_score(metrics)
+        candidates.append(
+            {
+                "symbol": symbol,
+                "leader_score": score,
+                "leader_score_components": components,
+                "leader_score_coverage": coverage,
+                "scan_types": sorted({hit.scan_type for hit in hits}),
+                "risk_bucket": _market_cap_bucket(metrics.get("market_cap")),
+                "market_cap": metrics.get("market_cap"),
+                "relative_volume": metrics.get("relative_volume"),
+                "return_5d": metrics.get("return_5d"),
+                "atr_expansion": metrics.get("atr_expansion"),
+                "close_location": metrics.get("close_location"),
+                "rs_rating": metrics.get("rs_rating"),
+                "dollar_volume": metrics.get("dollar_volume"),
+                "is_extended": _is_extended(metrics, hits),
+            }
+        )
+
+    return sorted(candidates, key=lambda item: item.get("leader_score", 0), reverse=True)
 
 
 def _load_rows(path: str) -> list[dict]:
@@ -220,6 +267,8 @@ def _scan_hit_from_row(row: dict, date: str, symbol: str, scan_type: str) -> Sca
         dollar_volume=_float(row.get("dollar_volume")),
         close_location=_float(row.get("close_location")),
         atr_expansion=_float(row.get("atr_expansion")),
+        rs_rating=_relative_strength_score(row),
+        market_cap=_float(row.get("market_cap")),
         close=_float(row.get("close")),
         industry=_clean(row.get("industry")),
         sector=_clean(row.get("sector")),
@@ -290,11 +339,10 @@ def _is_new_high(row: dict) -> bool:
 
 
 def _is_high_rs(row: dict) -> bool:
-    rs = _float(row.get("rs_rating", row.get("relative_strength")))
+    rs = _relative_strength_score(row)
     if rs is None:
         return False
-    threshold = 0.90 if rs <= 1.0 else 90.0
-    return rs >= threshold
+    return rs >= 90.0
 
 
 def _matched_theme_names(hit: ScanHit, themes: list[dict]) -> list[str]:
@@ -317,6 +365,124 @@ def _prior_counts(history: dict, theme_name: str, scan_type: str) -> list[int]:
         leadership_counts = record.get("leadership_counts") or {}
         counts.append(int(leadership_counts.get(scan_type, 0) or 0))
     return counts[-20:]
+
+
+def _merge_hit_metrics(hits: list[ScanHit]) -> dict:
+    metrics = {
+        "relative_volume": None,
+        "return_5d": None,
+        "atr_expansion": None,
+        "close_location": None,
+        "rs_rating": None,
+        "dollar_volume": None,
+        "market_cap": None,
+    }
+    for hit in hits:
+        for key in metrics:
+            value = getattr(hit, key, None)
+            if value is None:
+                continue
+            current = metrics[key]
+            metrics[key] = value if current is None else max(current, value)
+    return metrics
+
+
+def _leader_score(metrics: dict) -> tuple[float, dict, float]:
+    component_values = {
+        "relative_volume_score": _score_relative_volume(metrics.get("relative_volume")),
+        "return_5d_score": _score_return_5d(metrics.get("return_5d")),
+        "range_expansion_score": _score_range_expansion(metrics.get("atr_expansion")),
+        "close_location_score": _score_close_location(metrics.get("close_location")),
+        "relative_strength_score": _score_relative_strength(metrics.get("rs_rating")),
+        "liquidity_score": _score_liquidity(metrics.get("dollar_volume")),
+    }
+    weights = {
+        "relative_volume_score": 0.25,
+        "return_5d_score": 0.20,
+        "range_expansion_score": 0.20,
+        "close_location_score": 0.15,
+        "relative_strength_score": 0.10,
+        "liquidity_score": 0.10,
+    }
+    available = {key: value for key, value in component_values.items() if value is not None}
+    total_weight = sum(weights[key] for key in available)
+    total_possible = sum(weights.values())
+    if total_weight <= 0:
+        return 0.0, component_values, 0.0
+    score = sum(available[key] * weights[key] for key in available) / total_possible
+    coverage = total_weight / total_possible
+    return round(min(100.0, max(0.0, score)), 2), component_values, round(coverage, 4)
+
+
+def _score_relative_volume(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(min(100.0, max(0.0, (value / 3.0) * 100.0)), 2)
+
+
+def _score_return_5d(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(min(100.0, max(0.0, (value / 25.0) * 100.0)), 2)
+
+
+def _score_range_expansion(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(min(100.0, max(0.0, (value / 2.0) * 100.0)), 2)
+
+
+def _score_close_location(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(min(100.0, max(0.0, value * 100.0)), 2)
+
+
+def _score_relative_strength(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(min(100.0, max(0.0, value)), 2)
+
+
+def _score_liquidity(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    if value >= 100_000_000:
+        return 100.0
+    if value >= 20_000_000:
+        return 75.0
+    if value >= 5_000_000:
+        return 50.0
+    return 25.0
+
+
+def _market_cap_bucket(value: Optional[float]) -> str:
+    if value is None:
+        return "unknown"
+    if value >= 200_000_000_000:
+        return "mega"
+    if value >= 10_000_000_000:
+        return "large"
+    if value >= 2_000_000_000:
+        return "mid"
+    if value >= 300_000_000:
+        return "small"
+    return "micro"
+
+
+def _is_extended(metrics: dict, hits: list[ScanHit]) -> bool:
+    return (metrics.get("return_5d") or 0.0) >= 20.0 or any(
+        hit.scan_type == "five_day_20pct" for hit in hits
+    )
+
+
+def _relative_strength_score(row: dict) -> Optional[float]:
+    value = _float(row.get("rs_rating"))
+    if value is None:
+        value = _float(row.get("relative_strength"))
+    if value is None:
+        return None
+    return value * 100.0 if value <= 1.0 else value
 
 
 def _count_component_score(value: int, prior: list[int]) -> float:
