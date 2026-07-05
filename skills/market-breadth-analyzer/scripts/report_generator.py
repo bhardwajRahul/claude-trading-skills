@@ -349,7 +349,7 @@ def generate_markdown_report(analysis: dict, output_file: str):
     )
     lines.append("")
 
-    with open(output_file, "w") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
     print(f"  Markdown report saved to: {output_file}")
