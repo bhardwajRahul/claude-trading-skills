@@ -103,6 +103,9 @@ jobs:
           --cov-report=term-missing
           --cov-append
 
+      - name: Test market-news-analyst skill contract
+        run: python -m pytest skills/market-news-analyst/scripts/tests/ -v
+
       - name: Test market-top-detector
         run: >
           python -m pytest skills/market-top-detector/scripts/tests/ -v
@@ -137,6 +140,9 @@ jobs:
           --cov=skills/sector-analyst/scripts
           --cov-report=term-missing
           --cov-append
+
+      - name: Test scenario-analyzer skill contract
+        run: python -m pytest skills/scenario-analyzer/scripts/tests/ -v
 
       - name: Test stanley-druckenmiller-investment
         run: >
@@ -242,6 +248,15 @@ jobs:
           --cov=skills/trading-skills-navigator/scripts
           --cov-report=term-missing
           --cov-append
+
+      - name: Test technical-analyst skill contract
+        run: python -m pytest skills/technical-analyst/scripts/tests/ -v
+
+      - name: Test us-market-bubble-detector skill contract
+        run: python -m pytest skills/us-market-bubble-detector/scripts/tests/ -v
+
+      - name: Test us-stock-analysis skill contract
+        run: python -m pytest skills/us-stock-analysis/scripts/tests/ -v
 
       - name: Test repo-level scripts
         run: >
