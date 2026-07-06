@@ -410,7 +410,7 @@ def generate_markdown_report(analysis_result: dict[str, Any], output_path: Path)
         ]
     )
 
-    output_path.write_text("\n".join(lines))
+    output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def main() -> None:
