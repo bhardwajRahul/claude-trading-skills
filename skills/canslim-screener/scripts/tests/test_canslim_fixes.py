@@ -20,7 +20,32 @@ from calculators.institutional_calculator import (
     score_institutional_sponsorship,
 )
 from calculators.market_calculator import calculate_ema, calculate_market_direction
-from report_generator import generate_markdown_report
+from report_generator import format_stock_entry, generate_markdown_report
+from scorer import WEIGHTS_PHASE2
+
+
+def test_phase2_weights_sum_to_one():
+    assert sum(WEIGHTS_PHASE2.values()) == 1.0
+
+
+def test_stock_entry_handles_missing_price_and_market_cap():
+    lines = format_stock_entry(
+        1,
+        {
+            "symbol": "NULLS",
+            "company_name": "Null Values Inc.",
+            "composite_score": 50.0,
+            "rating": "Hold",
+            "rating_description": "Neutral",
+            "guidance": "Wait",
+            "weakest_component": "M",
+            "weakest_score": 50,
+            "price": None,
+            "market_cap": None,
+        },
+    )
+    assert "**Price:** N/A | **Market Cap:** N/A" in lines[1]
+
 
 # ---------------------------------------------------------------------------
 # B1: M Component - EMA calculation with real historical data
