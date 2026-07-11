@@ -41,7 +41,9 @@ except ImportError:  # pragma: no cover - exercised only without requests
 
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 BINANCE_FAPI_BASE = "https://fapi.binance.com"
-REQUEST_DELAY_S = 6.5
+REQUEST_DELAY_S = 8.0
+MAX_RETRIES = 4
+BACKOFF_BASE_S = 15
 HISTORY_DAYS = 365  # public API cap; auto-daily granularity above 90 days
 STABLECOIN_IDS = {
     "tether",
@@ -63,6 +65,12 @@ WRAPPED_OR_STAKED_IDS = {
     "coinbase-wrapped-btc",
     "wrapped-eeth",
     "rocket-pool-eth",
+    "wrapped-beacon-eth",
+    "susds",
+}
+NON_CRYPTO_BETA_IDS = {
+    "figure-heloc",
+    "blackrock-usd-institutional-digital-liquidity-fund",
 }
 
 
@@ -94,11 +102,24 @@ class DataClient:
             json.dump(data, f)
 
     def _get(self, url: str, params: dict = None):
+        """GET with 429-aware exponential backoff (respects Retry-After)."""
         if requests is None:
             raise RuntimeError("The 'requests' library is required for live fetches")
-        resp = requests.get(url, params=params or {}, timeout=30)
+        resp = None
+        for attempt in range(MAX_RETRIES):
+            resp = requests.get(url, params=params or {}, timeout=30)
+            if resp.status_code != 429:
+                resp.raise_for_status()
+                return resp.json()
+            retry_after = resp.headers.get("Retry-After", "")
+            delay = (
+                float(retry_after)
+                if retry_after.replace(".", "", 1).isdigit()
+                else BACKOFF_BASE_S * (2**attempt)
+            )
+            self._log(f"  rate limited (429); backing off {delay:.0f}s...")
+            time.sleep(delay)
         resp.raise_for_status()
-        return resp.json()
 
     def _log(self, msg: str):
         if not self.quiet:
@@ -117,12 +138,15 @@ class DataClient:
             {
                 "vs_currency": "usd",
                 "order": "market_cap_desc",
-                "per_page": self.top_n + len(STABLECOIN_IDS) + len(WRAPPED_OR_STAKED_IDS),
+                "per_page": self.top_n
+                + len(STABLECOIN_IDS)
+                + len(WRAPPED_OR_STAKED_IDS)
+                + len(NON_CRYPTO_BETA_IDS),
                 "page": 1,
                 "sparkline": "false",
             },
         )
-        excluded = STABLECOIN_IDS | WRAPPED_OR_STAKED_IDS
+        excluded = STABLECOIN_IDS | WRAPPED_OR_STAKED_IDS | NON_CRYPTO_BETA_IDS
         universe = [
             {"id": c["id"], "symbol": c["symbol"].upper()} for c in raw if c["id"] not in excluded
         ][: self.top_n]
@@ -206,7 +230,10 @@ class DataClient:
         series = {}
         for i, coin in enumerate(universe, 1):
             self._log(f"  [{i}/{len(universe)}] history: {coin['symbol']}")
-            series[coin["symbol"]] = self.fetch_history(coin["id"])
+            try:
+                series[coin["symbol"]] = self.fetch_history(coin["id"])
+            except Exception as exc:
+                self._log(f"  WARN: {coin['symbol']} history failed ({exc}); skipping coin")
 
         self._log("Fetching BTC dominance...")
         self.fetch_dominance()
