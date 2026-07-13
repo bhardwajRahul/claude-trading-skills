@@ -32,7 +32,8 @@ runs with zero network access.
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
 try:
     import requests
@@ -130,7 +131,8 @@ class DataClient:
     # ------------------------------------------------------------------
     def fetch_universe(self) -> list:
         """Top-N non-stable, non-wrapped coins by market cap."""
-        cached = self._cached("universe")
+        cache_key = f"universe_top{self.top_n}"
+        cached = self._cached(cache_key)
         if cached:
             return cached
         raw = self._get(
@@ -150,7 +152,7 @@ class DataClient:
         universe = [
             {"id": c["id"], "symbol": c["symbol"].upper()} for c in raw if c["id"] not in excluded
         ][: self.top_n]
-        self._store("universe", universe)
+        self._store(cache_key, universe)
         return universe
 
     def fetch_history(self, coin_id: str) -> list:
@@ -193,17 +195,29 @@ class DataClient:
             json.dump(history, f, indent=2)
 
     def load_dominance_series(self) -> list:
-        """Accumulated daily dominance history, oldest -> newest."""
+        """Return a contiguous 31-calendar-day dominance window, oldest first."""
         path = self._dominance_history_path()
         if not os.path.exists(path):
             return []
         with open(path) as f:
             history = json.load(f)
-        return [history[k] for k in sorted(history.keys())]
+        today = datetime.now(timezone.utc).date()
+        required_days = [today - timedelta(days=offset) for offset in range(30, -1, -1)]
+        required_keys = [day.isoformat() for day in required_days]
+        if any(key not in history for key in required_keys):
+            return []
+        return [history[key] for key in required_keys]
+
+    @staticmethod
+    def _funding_cache_key(symbols: list) -> str:
+        cohort = ",".join(sorted(set(symbols)))
+        digest = sha256(cohort.encode()).hexdigest()[:16]
+        return f"funding_{digest}"
 
     def fetch_funding(self, symbols: list) -> dict:
         """Latest 8h funding rate per USDT perp symbol."""
-        cached = self._cached("funding")
+        cache_key = self._funding_cache_key(symbols)
+        cached = self._cached(cache_key)
         if cached:
             return cached
         funding = {}
@@ -216,7 +230,7 @@ class DataClient:
                     funding[perp] = float(by_symbol[perp]["lastFundingRate"])
         except Exception as exc:  # funding is best-effort
             self._log(f"  WARN: funding fetch failed ({exc}); component will be skipped")
-        self._store("funding", funding)
+        self._store(cache_key, funding)
         return funding
 
     # ------------------------------------------------------------------

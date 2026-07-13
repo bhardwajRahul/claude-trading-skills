@@ -10,7 +10,7 @@ permalink: /en/skill-catalog/
 # Skill Catalog
 {: .no_toc }
 
-A comprehensive catalog of all 66 Claude Trading Skills organized by category. Badge indicators show API requirements at a glance.
+A comprehensive catalog of all 64 Claude Trading Skills organized by category. Badge indicators show API requirements at a glance.
 {: .fs-6 .fw-300 }
 
 > Use English skill names ("CANSLIM", "VCP", "FinViz", etc.) for best search results on this page.
@@ -73,7 +73,7 @@ A comprehensive catalog of all 66 Claude Trading Skills organized by category. B
 | **[IBD Distribution Day Monitor]({{ '/en/skills/ibd-distribution-day-monitor/' | relative_url }})** | Daily IBD Distribution Day detection for QQQ/SPY with 25-session expiration and 5% invalidation. Risk classification (NORMAL/CAUTION/HIGH/SEVERE) and TQQQ/QQQ exposure recommendation | <span class="badge badge-api">FMP Required</span> |
 | **[Downtrend Duration Analyzer]({{ '/en/skills/downtrend-duration-analyzer/' | relative_url }})** | Analyzes historical downtrend durations (peak-to-trough) and generates interactive HTML histograms segmented by sector and market cap | <span class="badge badge-api">FMP Required</span> |
 | **[COT Contrarian Detector]({{ '/en/skills/cot-contrarian-detector/' | relative_url }})** | Detects crowded large-speculator positioning across 65 CFTC futures markets via COT Index (3-year/26-week), implementing step 1 of Jason Shapiro's contrarian methodology | <span class="badge badge-api">FMP Required</span> |
-| **[Crypto Regime Analyzer]({{ '/en/skills/crypto-regime-analyzer/' | relative_url }})** | Quantifies crypto market regime health with a six-component 0-100 composite using free, keyless public data and an offline snapshot mode | <span class="badge badge-free">No API Key</span> |
+| **[News Reaction Failure Analyzer]({{ '/en/skills/news-reaction-failure-analyzer/' | relative_url }})** | Judges whether a crowded market failed to react to favorable news via a Monte-Carlo-verified drift-significance test, implementing step 2 of Jason Shapiro's contrarian methodology | <span class="badge badge-api">FMP Required</span> |
 
 ---
 
@@ -272,6 +272,7 @@ A comprehensive catalog of all 66 Claude Trading Skills organized by category. B
 | Drawdown Circuit Breaker | -- | -- | -- |
 | Pre Trade Discipline Gate | -- | -- | -- |
 | COT Contrarian Detector | Required | -- | -- |
+| News Reaction Failure Analyzer | Required | -- | -- |
 | Crypto Regime Analyzer | -- | -- | -- |
 
 "--" means not required. "Optional" means functionality is enhanced but the skill works without it.

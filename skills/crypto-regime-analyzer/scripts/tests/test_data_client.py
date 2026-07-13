@@ -1,4 +1,7 @@
-"""Tests for the data client's rate-limit handling and snapshot validation."""
+"""Tests for the data client's caching, rate limits, and snapshot validation."""
+
+import json
+from datetime import datetime, timedelta, timezone
 
 import data_client
 import pytest
@@ -80,6 +83,63 @@ def test_get_raises_after_max_retries(tmp_path, monkeypatch):
     monkeypatch.setattr(data_client.time, "sleep", lambda _s: None)
     with pytest.raises(RuntimeError):
         _client(tmp_path)._get("http://x")
+
+
+def test_universe_cache_is_scoped_by_top_n(tmp_path, monkeypatch):
+    raw = [
+        {"id": "bitcoin", "symbol": "btc"},
+        {"id": "ethereum", "symbol": "eth"},
+        {"id": "solana", "symbol": "sol"},
+    ]
+    calls = []
+
+    def fake_get(_url, params=None):
+        calls.append(params)
+        return raw
+
+    small = DataClient(str(tmp_path), top_n=1, quiet=True)
+    large = DataClient(str(tmp_path), top_n=2, quiet=True)
+    monkeypatch.setattr(small, "_get", fake_get)
+    monkeypatch.setattr(large, "_get", fake_get)
+
+    assert [coin["symbol"] for coin in small.fetch_universe()] == ["BTC"]
+    assert [coin["symbol"] for coin in large.fetch_universe()] == ["BTC", "ETH"]
+    assert len(calls) == 2
+
+
+def test_funding_cache_is_scoped_by_symbol_cohort(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+    calls = []
+
+    def fake_get(_url, params=None):
+        calls.append(params)
+        return [
+            {"symbol": "BTCUSDT", "lastFundingRate": "0.0001"},
+            {"symbol": "ETHUSDT", "lastFundingRate": "0.0002"},
+        ]
+
+    monkeypatch.setattr(client, "_get", fake_get)
+
+    assert client.fetch_funding(["BTC"]) == {"BTCUSDT": 0.0001}
+    assert client.fetch_funding(["ETH"]) == {"ETHUSDT": 0.0002}
+    assert len(calls) == 2
+
+
+def test_dominance_history_requires_contiguous_calendar_days(tmp_path):
+    client = _client(tmp_path)
+    today = datetime.now(timezone.utc).date()
+    history = {(today - timedelta(days=offset)).isoformat(): 50.0 + offset for offset in range(31)}
+    path = tmp_path / "dominance_history.json"
+    path.write_text(json.dumps(history))
+
+    series = client.load_dominance_series()
+    assert len(series) == 31
+    assert series[0] == 80.0
+    assert series[-1] == 50.0
+
+    del history[(today - timedelta(days=12)).isoformat()]
+    path.write_text(json.dumps(history))
+    assert client.load_dominance_series() == []
 
 
 def test_snapshot_validation_requires_btc(tmp_path):
