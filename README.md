@@ -50,6 +50,10 @@ New users should start with one of these operational workflows. Each link points
 
 See [`workflows/README.md`](workflows/README.md) for how to read a manifest and run it manually. For a one-page "which workflow fits my situation?" guide, see [Find Your Workflow](docs/en/find-your-workflow.md) ([日本語](docs/ja/find-your-workflow.md)).
 
+### What This Actually Costs
+
+Claude Skills require a paid Claude plan that supports the Skills feature. FMP, FINVIZ Elite, and Alpaca are optional data or broker integrations for specific workflows; the five-skill starter path below works with public CSVs, chart screenshots, and local files, so it does not require any paid data API subscription beyond your Claude plan.
+
 ### No API Key Starter Path
 
 If you do not have FMP / FINVIZ / Alpaca subscriptions, start with these five skills and run them manually:
@@ -125,6 +129,7 @@ The detailed catalog below is **auto-generated** from `skills-index.yaml` by `sc
 | Skill | Summary | Integrations | Status |
 |---|---|---|---|
 | **Breadth Chart Analyst** (`breadth-chart-analyst`) | This skill should be used when analyzing market breadth charts, specifically the S&P 500 Breadth Index (200-Day MA based) and the US Stock Market Uptrend Stock Ratio charts. | `chart_image` **required** | production |
+| **COT Contrarian Detector** (`cot-contrarian-detector`) | Detects crowded speculative (large-speculator) positioning in CFTC futures markets using Commitment of Traders data, implementing step 1 of Jason Shapiro's contrarian methodology. | `fmp` **required** | production |
 | **Crypto Regime Analyzer** (`crypto-regime-analyzer`) | Quantifies crypto market regime health (0-100 composite, 100 = risk-on) from six components using free keyless public data. | `coingecko` **required**, `binance_funding` _recommended_, `prices_json` optional | beta |
 | **Downtrend Duration Analyzer** (`downtrend-duration-analyzer`) | Analyze historical downtrend durations and generate interactive HTML histograms showing typical correction lengths by sector and market cap. | `local_calculation` — | production |
 | **Exposure Coach** (`exposure-coach`) | Generate a one-page Market Posture summary with net exposure ceiling, growth-vs-value bias, participation breadth, and new-entry-allowed vs cash-priority recommendation by integrating signals from breadth, regime, and flow analysis skills. | `local_calculation` — | production |

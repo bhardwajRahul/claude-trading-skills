@@ -30,6 +30,19 @@ def test_short_history_coins_are_skipped(universe):
     assert "NEWCOIN" in result["skipped"]
 
 
+def test_short_history_coins_do_not_change_50dma_confirmation_cohort(universe):
+    eligible = [50.0] * 150 + [200.0] * 49 + [100.0]
+    series = {f"ALT{i}": eligible.copy() for i in range(6)}
+    baseline = calculate_alt_breadth(series)
+    series["NEWCOIN"] = [float(i + 1) for i in range(100)]
+
+    result = calculate_alt_breadth(series)
+
+    assert result["pct_above_50dma"] == baseline["pct_above_50dma"]
+    assert result["universe_size"] == baseline["universe_size"]
+    assert "NEWCOIN" in result["skipped"]
+
+
 def test_rollover_modifier_reduces_score(universe):
     # All above 200DMA but recent 60 days sharply down -> below 50DMA.
     series = universe(n_up=10, n_down=0)

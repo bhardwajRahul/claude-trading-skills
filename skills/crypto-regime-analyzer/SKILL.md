@@ -50,11 +50,13 @@ Missing components have their weight proportionally redistributed (same conventi
 
 | Score | Zone | Posture |
 |---|---|---|
-| 80-100 | RISK_ON | Full crypto allocation permitted; alt entries allowed |
-| 40-79 | NEUTRAL | No strong signal; hold core positions, avoid aggressive adds |
-| 0-39 | RISK_OFF | Defensive; reduce exposure, rotate toward stables, no new entries |
+| 80-100 | RISK_ON | Broad risk-on conditions observed; review risk limits before decisions |
+| 40-79 | NEUTRAL | Mixed conditions observed; no strong regime conclusion |
+| 0-39 | RISK_OFF | Defensive market conditions observed; review existing risk controls |
 
-Three zones by design: a 2018-2026 weekly walk-forward validation (see `references/VALIDATION.md`) showed the extreme zones separate cleanly in forward returns (RISK_ON +21.9% vs RISK_OFF +7.5% mean 90d BTC forward return, monotonic across all three zones) while finer five-zone middle gradations did not rank monotonically. The zone map claims only what the historical evidence supported.
+These are heuristic descriptive bands, not validated allocation rules. See
+`references/VALIDATION.md` for the current evidence boundary and the artifacts
+required before making quantitative performance claims.
 
 ---
 
@@ -85,14 +87,16 @@ Options: `--top-n <int>` universe size (default 20), `--cache-dir <path>` fetch 
 The script writes `crypto_regime.json` (machine-readable, for chaining into other skills) and `crypto_regime.md` (one-page report), and prints a one-line summary:
 
 ```
-CRYPTO REGIME: CONSTRUCTIVE (score 68.4/100) — Core BTC/ETH-weighted positioning; selective alt entries
+CRYPTO REGIME: NEUTRAL (score 68.4/100) — Mixed conditions observed; no strong regime conclusion
 ```
 
 When presenting results, lead with the zone and posture, then explain the 1-2 components most responsible for the score using their `signal` strings. Flag any components reporting `data_available: false` and what that means for confidence.
 
 ### Phase 3 (optional): Feed Downstream
 
-The JSON composite is designed to slot into an `exposure-coach`-style posture summary as a crypto-sleeve input, or to gate any crypto screening/analysis the user runs afterward: no aggressive adds below RISK_ON, no new entries in RISK_OFF.
+The JSON composite can slot into an `exposure-coach`-style posture summary as
+one descriptive crypto-market input. It must not independently authorize,
+block, size, or execute a trade.
 
 ## Output
 
@@ -104,13 +108,13 @@ The script writes two artifacts to `--output-dir` and prints a one-line summary 
 
 ## Resources
 
-- `references/VALIDATION.md` — 2018-2026 walk-forward historical validation: methodology, zone forward-return tables, exposure-scaling results, and stated limitations.
+- `references/VALIDATION.md` — validation status, evidence boundary, and reproduction requirements.
 - `references/crypto_regime_methodology.md` — full scoring rationale, every threshold table, the offline snapshot JSON schema, and the live data-source endpoint list.
 - `scripts/crypto_regime_analyzer.py` — CLI orchestrator (entry point).
 - `scripts/data_client.py` — CoinGecko/Binance fetchers, per-day cache, dominance history accumulator, offline loader.
 - `scripts/calculators/` — one module per component; pure functions, fully unit-tested.
 - `scripts/scorer.py` — weighted composite with proportional weight redistribution.
-- `scripts/tests/` — 39 tests covering every component, the scorer, and end-to-end bull/bear/degraded snapshots.
+- `scripts/tests/` — tests covering every component, the scorer, sparse-data fail-closed behavior, and end-to-end bull/bear/degraded snapshots.
 
 ## Known Limitations
 

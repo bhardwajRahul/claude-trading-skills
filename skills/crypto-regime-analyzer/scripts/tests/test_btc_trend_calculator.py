@@ -9,6 +9,11 @@ def test_insufficient_history_flags_unavailable():
     assert result["score"] == 50
 
 
+def test_slope_requires_full_200dma_window_at_20_day_lookback():
+    assert calculate_btc_trend([100.0] * 219)["data_available"] is False
+    assert calculate_btc_trend([100.0] * 220)["data_available"] is True
+
+
 def test_bull_stack_scores_high(trending_series):
     result = calculate_btc_trend(trending_series(n=400, daily_pct=0.3))
     assert result["data_available"] is True

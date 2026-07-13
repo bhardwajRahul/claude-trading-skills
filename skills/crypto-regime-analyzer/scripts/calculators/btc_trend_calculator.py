@@ -6,7 +6,7 @@ Bitcoin is the reserve asset of the crypto market: alt regimes almost never
 stay risk-on while BTC trend structure is broken. This component scores the
 health of BTC's primary trend using daily closes.
 
-Input: list of BTC daily closes, oldest first (>= 210 observations for full
+Input: list of BTC daily closes, oldest first (>= 220 observations for full
 scoring; degrades gracefully below that).
 
 Scoring (100 = healthy risk-on trend):
@@ -28,8 +28,8 @@ Scoring (100 = healthy risk-on trend):
 Score is clamped to [0, 100].
 """
 
-MIN_FULL_HISTORY = 210
 SLOPE_LOOKBACK = 20
+MIN_FULL_HISTORY = 200 + SLOPE_LOOKBACK
 CROSS_PROXIMITY_PCT = 0.015
 
 
@@ -50,7 +50,7 @@ def calculate_btc_trend(closes: list) -> dict:
     if not closes or len(closes) < MIN_FULL_HISTORY:
         return {
             "score": 50,
-            "signal": "NO DATA: Need >= 210 daily closes for BTC trend structure",
+            "signal": f"NO DATA: Need >= {MIN_FULL_HISTORY} daily closes for BTC trend structure",
             "data_available": False,
         }
 

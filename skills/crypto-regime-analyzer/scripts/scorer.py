@@ -15,18 +15,13 @@ Component Weights:
 Total: 100%
 
 When a component has data_available=False, its weight is proportionally
-redistributed among the remaining available components (same convention
-as market-breadth-analyzer).
+redistributed only when at least four components representing at least 65%
+of the original model weight remain. Sparser inputs fail closed as UNKNOWN.
 
 Regime Zone Mapping (100 = Risk-on):
-  80-100: RISK_ON  - Full crypto allocation permitted; alt entries allowed
-  40-79:  NEUTRAL  - No strong signal; hold core, avoid aggressive adds
-  0-39:   RISK_OFF - Defensive; reduce exposure, no new entries
-
-Three zones (not five) by design: historical validation (2018-2026 weekly
-walk-forward, see references/) showed the extreme zones separate cleanly
-in forward returns while finer middle gradations did not rank
-monotonically. The zone map claims only what the data supported.
+  80-100: RISK_ON  - Broad risk-on conditions observed
+  40-79:  NEUTRAL  - Mixed conditions; no strong regime conclusion
+  0-39:   RISK_OFF - Defensive market conditions observed
 """
 
 COMPONENT_WEIGHTS = {
@@ -47,10 +42,13 @@ COMPONENT_LABELS = {
     "momentum_thrust": "Momentum Thrust / Washout",
 }
 
+MIN_AVAILABLE_COMPONENTS = 4
+MIN_AVAILABLE_WEIGHT = 0.65
+
 ZONES = [
-    (80, "RISK_ON", "Full crypto allocation permitted; alt entries allowed"),
-    (40, "NEUTRAL", "No strong signal; hold core positions, avoid aggressive adds"),
-    (0, "RISK_OFF", "Defensive; reduce exposure, rotate toward stables, no new entries"),
+    (80, "RISK_ON", "Broad risk-on conditions observed; review risk limits before decisions"),
+    (40, "NEUTRAL", "Mixed conditions observed; no strong regime conclusion"),
+    (0, "RISK_OFF", "Defensive market conditions observed; review existing risk controls"),
 ]
 
 
@@ -69,16 +67,22 @@ def calculate_composite_score(components: dict) -> dict:
         for cid, comp in components.items()
         if cid in COMPONENT_WEIGHTS and comp.get("data_available", False)
     }
-    if not available:
+    total_weight = sum(COMPONENT_WEIGHTS[cid] for cid in available)
+    if len(available) < MIN_AVAILABLE_COMPONENTS or total_weight < MIN_AVAILABLE_WEIGHT:
         return {
             "score": None,
             "zone": "UNKNOWN",
-            "guidance": "No components had usable data",
+            "guidance": (
+                "Insufficient component coverage for a regime classification "
+                f"({len(available)}/{len(COMPONENT_WEIGHTS)} components, "
+                f"{total_weight:.0%} model weight)"
+            ),
             "effective_weights": {},
-            "components_available": 0,
+            "components_available": len(available),
+            "components_total": len(COMPONENT_WEIGHTS),
+            "available_weight": round(total_weight, 4),
         }
 
-    total_weight = sum(COMPONENT_WEIGHTS[cid] for cid in available)
     effective = {cid: COMPONENT_WEIGHTS[cid] / total_weight for cid in available}
     score = sum(available[cid]["score"] * w for cid, w in effective.items())
     score = round(max(0.0, min(100.0, score)), 1)
@@ -96,4 +100,5 @@ def calculate_composite_score(components: dict) -> dict:
         "effective_weights": {k: round(v, 4) for k, v in effective.items()},
         "components_available": len(available),
         "components_total": len(COMPONENT_WEIGHTS),
+        "available_weight": round(total_weight, 4),
     }

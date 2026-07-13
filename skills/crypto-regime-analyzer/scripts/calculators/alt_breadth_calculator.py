@@ -62,7 +62,14 @@ def calculate_alt_breadth(alt_series: dict) -> dict:
     Returns:
         Dict with score, signal, data_available, and breadth details.
     """
-    pct_200, counted, skipped = _pct_above_sma(alt_series or {}, MIN_HISTORY)
+    alt_series = alt_series or {}
+    eligible = {
+        symbol: closes
+        for symbol, closes in alt_series.items()
+        if closes and len(closes) >= MIN_HISTORY
+    }
+    skipped = [symbol for symbol in alt_series if symbol not in eligible]
+    pct_200, counted, _ = _pct_above_sma(eligible, MIN_HISTORY)
     if counted < MIN_UNIVERSE:
         return {
             "score": 50,
@@ -71,7 +78,7 @@ def calculate_alt_breadth(alt_series: dict) -> dict:
             "data_available": False,
         }
 
-    pct_50, _, _ = _pct_above_sma(alt_series, 50)
+    pct_50, _, _ = _pct_above_sma(eligible, 50)
     score = _base_score(pct_200)
     modifier = ""
     if pct_50 >= pct_200 + 15:

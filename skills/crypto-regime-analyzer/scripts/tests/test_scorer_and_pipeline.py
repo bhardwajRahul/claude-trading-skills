@@ -1,6 +1,7 @@
 """Tests for the composite scorer and end-to-end offline analysis."""
 
 from crypto_regime_analyzer import run_analysis
+from report_generator import generate_markdown_report
 from scorer import COMPONENT_WEIGHTS, calculate_composite_score
 
 
@@ -45,6 +46,37 @@ def test_no_data_returns_unknown():
     result = calculate_composite_score(components)
     assert result["score"] is None
     assert result["zone"] == "UNKNOWN"
+
+
+def test_sparse_components_fail_closed_instead_of_risk_on():
+    components = {cid: _comp(0, available=False) for cid in COMPONENT_WEIGHTS}
+    components["btc_trend"] = _comp(100)
+    components["drawdown_vol"] = _comp(95)
+
+    result = calculate_composite_score(components)
+
+    assert result["score"] is None
+    assert result["zone"] == "UNKNOWN"
+    assert result["components_available"] == 2
+    assert "insufficient" in result["guidance"].lower()
+
+
+def test_sparse_component_report_explains_coverage_failure(tmp_path):
+    components = {cid: _comp(0, available=False) for cid in COMPONENT_WEIGHTS}
+    components["btc_trend"] = _comp(100)
+    components["drawdown_vol"] = _comp(95)
+    analysis = {
+        "metadata": {},
+        "components": components,
+        "composite": calculate_composite_score(components),
+    }
+    output = tmp_path / "report.md"
+
+    generate_markdown_report(analysis, str(output))
+
+    text = output.read_text()
+    assert "UNKNOWN" in text
+    assert "2/6 components" in text
 
 
 def test_end_to_end_bull_snapshot(trending_series, universe):

@@ -40,7 +40,12 @@ def generate_markdown_report(analysis: dict, output_file: str):
         "",
     ]
     if score is None:
-        lines.append("No usable data — composite could not be computed.")
+        lines += [
+            "**Zone: UNKNOWN**",
+            "",
+            composite.get("guidance", "Insufficient component coverage"),
+            "",
+        ]
     else:
         lines += [
             f"**Score: {score} / 100 — {composite.get('zone')}**",
@@ -68,7 +73,8 @@ def generate_markdown_report(analysis: dict, output_file: str):
         "## Notes",
         "",
         "- Score direction: 100 = risk-on health, 0 = critical risk-off.",
-        "- Missing components have their weight redistributed proportionally.",
+        "- Missing weights are redistributed only when at least four components",
+        "  representing at least 65% of model weight remain; otherwise the zone is UNKNOWN.",
         "- This report describes market conditions; it is not investment advice",
         "  and issues no buy/sell instructions.",
         "",
@@ -84,7 +90,7 @@ def print_summary(analysis: dict):
     composite = analysis.get("composite", {})
     score = composite.get("score")
     if score is None:
-        print("CRYPTO REGIME: UNKNOWN (no usable data)")
+        print(f"CRYPTO REGIME: UNKNOWN — {composite.get('guidance', 'insufficient coverage')}")
         return
     print(
         f"CRYPTO REGIME: {composite.get('zone')} (score {score}/100) — {composite.get('guidance')}"
