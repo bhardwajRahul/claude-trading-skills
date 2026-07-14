@@ -260,6 +260,36 @@ class TestConstraints:
 
 
 class TestFractionalShares:
+    def test_fractional_exact_precision_boundary_is_preserved(self):
+        """Binary float noise must not floor an exact decimal boundary twice."""
+        params = SizingParameters(
+            account_size=1_150,
+            entry_price=100.0,
+            stop_price=90.0,
+            risk_pct=1.0,
+            fractional_shares=True,
+            share_precision=2,
+        )
+        result = calculate_position(params)
+        assert result["calculations"]["fixed_fractional"]["shares"] == 1.15
+        assert result["final_recommended_shares"] == 1.15
+        assert result["final_risk_dollars"] == 11.5
+
+    def test_fractional_decimal_inputs_are_used_before_subtraction(self):
+        """Entry-stop subtraction must not pollute an exact share boundary."""
+        params = SizingParameters(
+            account_size=18.81,
+            entry_price=10.0,
+            stop_price=9.01,
+            risk_pct=1.0,
+            fractional_shares=True,
+            share_precision=2,
+        )
+        result = calculate_position(params)
+        assert result["calculations"]["fixed_fractional"]["shares"] == 0.19
+        assert result["final_recommended_shares"] == 0.19
+        assert result["final_risk_dollars"] == 0.19
+
     def test_fractional_fixed_fractional_floors_to_precision(self):
         """--fractional supports small-account sizing without exceeding risk."""
         params = SizingParameters(
