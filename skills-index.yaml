@@ -1196,10 +1196,15 @@ skills:
     type: image
     requirement: required
     note: Chart screenshot input
+  - id: fmp
+    type: market_data
+    requirement: optional
+    note: Optional weekly OHLCV fallback for contrarian confirmation (Shapiro step 3)
   inputs:
   - weekly_chart_image
   outputs:
   - technical_assessment_report
+  - price_action_confirmation_report
   workflows:
   - swing-opportunity-daily
 - id: theme-detector

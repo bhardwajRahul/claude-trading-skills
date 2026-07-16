@@ -216,7 +216,7 @@ A comprehensive catalog of all 64 Claude Trading Skills organized by category. B
 | Institutional Flow Tracker | Required | -- | -- |
 | Sector Analyst | -- | -- | -- |
 | Breadth Chart Analyst | -- | -- | -- |
-| Technical Analyst | -- | -- | -- |
+| Technical Analyst | Optional | -- | -- |
 | Market News Analyst | -- | -- | -- |
 | Market Environment Analysis | -- | -- | -- |
 | Market Breadth Analyzer | -- | -- | -- |
