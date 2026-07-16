@@ -522,6 +522,39 @@ class TestDetectFailedBreakout:
         )
         assert result["triggered"] is False
 
+    # --- P3 regression (user re-review of PR #247): the `detail` string
+    # must describe the ACTUAL direction of the breakout -- "above" for a
+    # CROWDED_LONG (upside) breakout, "below" for the CROWDED_SHORT
+    # (downside) mirror -- never a hardcoded "above" regardless of
+    # direction.
+
+    def test_detail_says_above_for_crowded_long(self):
+        bars = make_weekly_bars(20, base=100.0, step=0.0)
+        bars[15]["close"] = 200.0
+        bars[17]["close"] = 100.0
+        result = detect_failed_breakout(
+            bars, "CROWDED_LONG", extreme_lookback_weeks=13, signal_recency_weeks=4
+        )
+        assert result["triggered"] is True
+        assert "above" in result["detail"]
+        assert "below" not in result["detail"]
+
+    def test_detail_says_below_for_crowded_short_mirror(self):
+        bars = make_weekly_bars(20, base=100.0, step=0.0)
+        # Downside breakout: CLOSE strictly below the prior extreme-lookback
+        # low, then closes back above that level within 3 weeks (mirror of
+        # the CROWDED_LONG case above).
+        bars[15]["close"] = 0.0  # breakout
+        bars[16]["close"] = 0.0  # still below/neutral (no failure yet)
+        bars[17]["close"] = 100.0  # closes back above the breakout level -> failure
+        result = detect_failed_breakout(
+            bars, "CROWDED_SHORT", extreme_lookback_weeks=13, signal_recency_weeks=4
+        )
+        assert result["triggered"] is True
+        assert result["week_of"] == bars[17]["week_of"]
+        assert "below" in result["detail"]
+        assert "above" not in result["detail"]
+
     def test_close_equal_to_prior_high_is_not_a_closing_breakout_strict(self):
         bars = make_weekly_bars(20, base=100.0, step=0.0)
         window, _ = compute_prior_window(bars, 15, 13)

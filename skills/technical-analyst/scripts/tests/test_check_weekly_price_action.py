@@ -30,6 +30,7 @@ from check_weekly_price_action import (  # noqa: E402
     fetch_price_series,
     generate_json_report,
     generate_markdown_report,
+    load_json_file,
     resolve_direction_from_detector,
 )
 
@@ -193,6 +194,38 @@ class TestAsOfInformationCutoff:
         returned_dates = [b["date"] for b in result["daily_bars"]]
         assert returned_dates == dates[:70]
         assert all(d <= as_of for d in returned_dates)
+
+
+# ---------------------------------------------------------------------------
+# load_json_file: distinguishes an unreadable/missing file from a
+# syntactically-invalid one (P1 regression, user re-review of PR #247) so
+# main() can route each to its own named, fail-closed reason instead of
+# exiting 1 with no report for either.
+# ---------------------------------------------------------------------------
+
+
+class TestLoadJsonFile:
+    def test_missing_file_returns_unreadable_reason(self, tmp_path):
+        data, error, reason = load_json_file(str(tmp_path / "does_not_exist.json"))
+        assert data is None
+        assert error is not None
+        assert reason == "unreadable"
+
+    def test_invalid_json_syntax_returns_parse_error_reason(self, tmp_path):
+        bad_path = tmp_path / "bad.json"
+        bad_path.write_text("{bad json", encoding="utf-8")
+        data, error, reason = load_json_file(str(bad_path))
+        assert data is None
+        assert error is not None
+        assert reason == "parse_error"
+
+    def test_valid_json_returns_no_error_or_reason(self, tmp_path):
+        good_path = tmp_path / "good.json"
+        good_path.write_text('{"a": 1}', encoding="utf-8")
+        data, error, reason = load_json_file(str(good_path))
+        assert data == {"a": 1}
+        assert error is None
+        assert reason is None
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +528,31 @@ class TestMainFailsClosedOnMalformedInput:
         payload = self._report(out_dir)
         assert payload["verdict"] == "INSUFFICIENT_DATA"
         assert payload["verdict_reason"] == "no_direction_provided"
+
+    # --- P1 regression (user re-review of PR #247): a missing or
+    # syntactically-invalid --detector-json file used to exit 1 with NO
+    # report -- violating SKILL.md's own fail-closed contract
+    # (INSUFFICIENT_DATA / no crash / exit 0 / report written). Neither
+    # case touches the network (both fail before direction resolution
+    # reaches the price-fetch stage), so subprocess is safe here, same as
+    # the other malformed-input tests in this class.
+
+    def test_detector_json_missing_file_is_insufficient_data_exit_0(self, tmp_path):
+        nonexistent_path = tmp_path / "does_not_exist.json"
+        result, out_dir = self._run_cli(tmp_path, ["--detector-json", str(nonexistent_path)])
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        payload = self._report(out_dir)
+        assert payload["verdict"] == "INSUFFICIENT_DATA"
+        assert payload["verdict_reason"] == "detector_json_unreadable"
+
+    def test_detector_json_invalid_syntax_is_insufficient_data_exit_0(self, tmp_path):
+        bad_path = tmp_path / "bad.json"
+        bad_path.write_text("{bad json", encoding="utf-8")
+        result, out_dir = self._run_cli(tmp_path, ["--detector-json", str(bad_path)])
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        payload = self._report(out_dir)
+        assert payload["verdict"] == "INSUFFICIENT_DATA"
+        assert payload["verdict_reason"] == "detector_json_parse_error"
 
     def test_detector_json_top_level_list_exits_0(self, tmp_path):
         detector_path = tmp_path / "detector_list.json"

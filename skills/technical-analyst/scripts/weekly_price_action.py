@@ -347,13 +347,19 @@ def detect_failed_breakout(
         }
 
     f_idx, b_idx, level, used = best
+    # Direction-aware wording (P3 regression, user re-review of PR #247):
+    # a CROWDED_LONG breakout is a CLOSE strictly ABOVE the prior extreme
+    # high; the CROWDED_SHORT mirror is a CLOSE strictly BELOW the prior
+    # extreme low -- the detail text must say which one actually happened,
+    # never a hardcoded "above" regardless of direction.
+    breakout_word = "above" if direction == "CROWDED_LONG" else "below"
     return {
         "triggered": True,
         "breakout_level": level,
         "week_of": weekly_bars[f_idx]["week_of"],
         "window_weeks_used": used,
         "detail": (
-            f"closing breakout above {level} at week {weekly_bars[b_idx]['week_of']}, "
+            f"closing breakout {breakout_word} {level} at week {weekly_bars[b_idx]['week_of']}, "
             f"failed (closed back through) at week {weekly_bars[f_idx]['week_of']}"
         ),
     }

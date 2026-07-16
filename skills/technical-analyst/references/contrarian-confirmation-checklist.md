@@ -285,9 +285,14 @@ the other mode's insufficiency rather than treating it as a disagreement.
   `futures-position-sizer`, not this checklist.
 - **`INSUFFICIENT_DATA` never advances the pipeline.** Fewer than
   `min_weeks` completed weeks, no usable price source, or a
-  `--detector-json` that is missing, stale, future-dated, or carries a
-  non-`CROWDED_*` classification all fail closed — never a crash, never a
-  forced call on inadequate data.
+  `--detector-json` that is unreadable (missing/can't be opened),
+  syntactically invalid, structurally malformed, stale, future-dated, or
+  carries a non-`CROWDED_*` classification all fail closed (reasons
+  `detector_json_unreadable` / `detector_json_parse_error` /
+  `malformed_detector_json` / `detector_json_stale` /
+  `detector_future_data_date` / `not_crowded` respectively) — never a
+  crash, never a bare non-zero exit with no report, never a forced call on
+  inadequate data.
 - **Weekly timeframe only.** This checklist is defined entirely in terms
   of completed ISO calendar weeks; it says nothing about daily or
   intraday price action.

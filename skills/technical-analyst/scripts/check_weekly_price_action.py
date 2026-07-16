@@ -299,16 +299,26 @@ def fetch_price_series(
 # crashes) --------------------------------------------------------------
 
 
-def load_json_file(path: str) -> tuple[dict[str, Any] | None, str | None]:
-    """Read and parse a JSON file. Returns (data, None) or (None, error)."""
+def load_json_file(path: str) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Read and parse a JSON file. Returns (data, None, None) on success, or
+    (None, error, reason) on failure, where `reason` is a machine-readable
+    tag distinguishing the two ways this can fail closed: `"unreadable"`
+    (the file is missing, unreadable, or otherwise can't be opened -- an
+    OSError) vs `"parse_error"` (the file opened fine but isn't valid
+    JSON). Callers use `reason` (not the free-text `error` string, which
+    is for logging only) to pick a specific fail-closed verdict_reason
+    (P1 regression, user re-review of PR #247: this file previously had no
+    reason tag at all, and callers exited 1 with no report for BOTH cases
+    instead of failing closed to INSUFFICIENT_DATA like every other
+    degraded-input path in this script)."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
-        return None, f"cannot read {path}: {exc}"
+        return None, f"cannot read {path}: {exc}", "unreadable"
     try:
-        return json.loads(text), None
+        return json.loads(text), None, None
     except json.JSONDecodeError as exc:
-        return None, f"invalid JSON in {path}: {exc}"
+        return None, f"invalid JSON in {path}: {exc}", "parse_error"
 
 
 def resolve_direction_from_detector(
@@ -634,10 +644,20 @@ def main() -> None:
     direction = args.direction
     detector_age_days = None
     if direction is None and args.detector_json:
-        detector_data, error = load_json_file(args.detector_json)
+        detector_data, error, load_reason = load_json_file(args.detector_json)
         if error:
-            print(f"Error: {error}", file=sys.stderr)
-            sys.exit(1)
+            # Fail closed, exactly like every other degraded --detector-json
+            # input below (malformed shape, missing data_date, stale, ...):
+            # exit 0, report written, never a bare exit-1 with no report
+            # (P1 regression, user re-review of PR #247).
+            print(f"WARN: {error}", file=sys.stderr)
+            insufficient_reason = (
+                "detector_json_unreadable"
+                if load_reason == "unreadable"
+                else "detector_json_parse_error"
+            )
+            emit(_insufficient_data_output(symbol, None, insufficient_reason, base_run_context()))
+            sys.exit(0)
         direction, reason, ctx = resolve_direction_from_detector(
             detector_data, symbol, args.as_of, args.max_detector_age_days
         )

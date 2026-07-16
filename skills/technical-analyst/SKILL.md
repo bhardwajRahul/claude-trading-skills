@@ -362,9 +362,10 @@ The script fetches weekly-resampled OHLC via a documented futures-to-ETF
 fallback chain (see the module docstring in
 `scripts/check_weekly_price_action.py`), truncates daily bars to `--as-of`
 BEFORE resampling (no lookahead), and fails closed to
-`INSUFFICIENT_DATA` — never a crash — on a missing/stale/malformed
-`--detector-json`, too little price history (`--min-weeks`, default 30),
-or no usable price source.
+`INSUFFICIENT_DATA` — never a crash — on an unreadable (missing file),
+syntactically invalid, stale, or structurally malformed `--detector-json`,
+too little price history (`--min-weeks`, default 30), or no usable price
+source.
 
 ### Conservative Disagreement Rule
 
