@@ -90,6 +90,27 @@ skills:
   - composite_scores
   workflows:
   - swing-opportunity-daily
+- id: contrarian-setup-gate
+  display_name: Contrarian Setup Gate
+  category: trade-planning
+  status: beta
+  summary: Offline synthesis gate that combines COT crowding, news-reaction failure, and weekly
+    price-action confirmation into one actionable setup_status via a fail-closed precedence state
+    machine, implementing the decision center of Jason Shapiro's contrarian methodology.
+  timeframe: event-driven
+  difficulty: intermediate
+  integrations:
+  - id: local_calculation
+    type: calculation
+    requirement: not_required
+    note: Reads the three upstream contrarian-pipeline report JSONs; works offline
+  inputs:
+  - cot_crowding_report
+  - news_failure_verdict
+  - price_action_confirmation_report
+  outputs:
+  - contrarian_setup_gate_report
+  workflows: []
 - id: cot-contrarian-detector
   display_name: COT Contrarian Detector
   category: market-regime

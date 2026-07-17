@@ -74,6 +74,7 @@ A comprehensive catalog of all 64 Claude Trading Skills organized by category. B
 | **[Downtrend Duration Analyzer]({{ '/en/skills/downtrend-duration-analyzer/' | relative_url }})** | Analyzes historical downtrend durations (peak-to-trough) and generates interactive HTML histograms segmented by sector and market cap | <span class="badge badge-api">FMP Required</span> |
 | **[COT Contrarian Detector]({{ '/en/skills/cot-contrarian-detector/' | relative_url }})** | Detects crowded large-speculator positioning across 65 CFTC futures markets via COT Index (3-year/26-week), implementing step 1 of Jason Shapiro's contrarian methodology | <span class="badge badge-api">FMP Required</span> |
 | **[News Reaction Failure Analyzer]({{ '/en/skills/news-reaction-failure-analyzer/' | relative_url }})** | Judges whether a crowded market failed to react to favorable news via a Monte-Carlo-verified drift-significance test, implementing step 2 of Jason Shapiro's contrarian methodology | <span class="badge badge-api">FMP Required</span> |
+| **[Contrarian Setup Gate]({{ '/en/skills/contrarian-setup-gate/' | relative_url }})** | Synthesizes crowding, news-failure, and price-action verdicts into one setup_status via a fail-closed precedence state machine, implementing the decision center of Jason Shapiro's contrarian methodology. Beta. Pure offline calculation | <span class="badge badge-free">No API</span> |
 
 ---
 
@@ -273,5 +274,6 @@ A comprehensive catalog of all 64 Claude Trading Skills organized by category. B
 | Pre Trade Discipline Gate | -- | -- | -- |
 | COT Contrarian Detector | Required | -- | -- |
 | News Reaction Failure Analyzer | Required | -- | -- |
+| Contrarian Setup Gate | -- | -- | -- |
 
 "--" means not required. "Optional" means functionality is enhanced but the skill works without it.
