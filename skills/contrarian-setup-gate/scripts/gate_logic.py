@@ -1,0 +1,812 @@
+#!/usr/bin/env python3
+"""
+Contrarian Setup Gate -- pure synthesis logic.
+
+The center of Jason Shapiro's contrarian pipeline: this module normalizes
+the three upstream verdicts (crowding / news-failure / price-action) into
+one fail-closed `NormalizedInput` per step, then combines them through an
+explicit, exhaustively-tested precedence state machine into one actionable
+`setup_status`.
+
+This module is PURE: no file I/O, no network, no environment reads. The CLI
+(`run_contrarian_setup_gate.py`) owns file loading (with 4-class hardening:
+unreadable / parse_error / malformed / stale) and report generation; it
+passes already-parsed JSON (or a `load_error` tag) into the `normalize_*`
+functions below.
+
+State machine precedence (plan Issue #241 §3.3, v3):
+  1. Crowding is evaluated FIRST and EXCLUSIVELY. INVALID/INSUFFICIENT ->
+     INSUFFICIENT_EVIDENCE; NOT_CONFIRMED (classification NEUTRAL) ->
+     REJECTED, regardless of any downstream N/P state -- a corrupted or
+     mismatched downstream file must never soften crowding's own
+     definitive "not crowded" conclusion.
+  2. (Crowding CONFIRMED from here.) Any provided news/price INVALID ->
+     INSUFFICIENT_EVIDENCE.
+  3. Any news/price NOT_CONFIRMED -> REJECTED.
+  4. Any provided news/price INSUFFICIENT -> INSUFFICIENT_EVIDENCE.
+  5. Out-of-order use (price provided while news is PENDING) caps at
+     CROWDED with a warning -- the pipeline order (crowding -> news ->
+     price) was skipped, but a NOT_CONFIRMED price verdict still REJECTs
+     via rule 3 above (evaluated before this rule is ever reached).
+  6. Crowding CONFIRMED, news+price PENDING -> CROWDED.
+  7. Crowding+news CONFIRMED, price PENDING -> WATCHING_PRICE.
+  8. Crowding+news+price CONFIRMED -> READY_FOR_PLAN (direction,
+     gate_confidence, entry_trigger, invalidation_level populated).
+
+Cross-input consistency (symbol_mismatch / direction_mismatch /
+schema_unsupported) is PER-INPUT INVALID (v3): a failure marks the
+exhibiting input INVALID with a named reason and flows into the rules
+above exactly like a loader failure -- never a global override that could
+soften crowding's own conclusion.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Any
+
+SCHEMA_VERSION = "1.0"
+SKILL_NAME = "contrarian-setup-gate"
+
+STATE_CONFIRMED = "CONFIRMED"
+STATE_NOT_CONFIRMED = "NOT_CONFIRMED"
+STATE_INSUFFICIENT = "INSUFFICIENT"
+STATE_PENDING = "PENDING"
+STATE_INVALID = "INVALID"
+
+STEP_CROWDING = "crowding"
+STEP_NEWS = "news_failure"
+STEP_PRICE = "price_action"
+
+# CROWDED_LONG means the crowd is long -> fade SHORT. CROWDED_SHORT means
+# the crowd is short -> fade LONG. NEUTRAL is not one of these keys (it
+# maps to NOT_CONFIRMED, not a fade direction).
+FADE_DIRECTION = {"CROWDED_LONG": "SHORT", "CROWDED_SHORT": "LONG"}
+
+NEWS_VERDICTS = {"CONFIRMED", "NOT_CONFIRMED", "INSUFFICIENT_EVIDENCE"}
+PRICE_VERDICTS = {"CONFIRMED", "NOT_CONFIRMED", "INSUFFICIENT_DATA"}
+
+# HIGH > MEDIUM; LOW is reserved upstream and never emitted, but an unknown
+# value still ranks weakest here rather than crashing (fail closed).
+CONFIDENCE_RANK = {"HIGH": 2, "MEDIUM": 1}
+
+# "Near stale" fires when age is within this many days of the configured
+# max age (and not already over it, which is INVALID `<input>_json_stale`).
+NEAR_STALE_WINDOW_DAYS = 2
+
+# Maps TA's short verdict_reason token (plan §2 output contract) back to
+# the `checks` dict key that carries its `week_of`, for entry_trigger.
+CHECK_REASON_TO_KEY = {
+    "key_reversal": "weekly_key_reversal",
+    "failed_extreme": "failed_extreme",
+    "failed_breakout": "failed_breakout",
+}
+
+REQUIRED_REPORT_KEYS = ("symbol", "direction", "verdict", "confidence")
+
+
+@dataclass(frozen=True)
+class NormalizedInput:
+    """One step's normalized, fail-closed state.
+
+    `kind` selects which fields `to_audit_dict()` surfaces, matching the
+    `inputs.<step>` block shape in the output contract (plan §2). `reason`
+    is populated for INVALID (a gate-side validation failure, named token)
+    and for NOT_CONFIRMED/INSUFFICIENT derived from an upstream verdict
+    (the upstream's own `verdict_reason`, when present -- more informative
+    than a generic token).
+    """
+
+    kind: str
+    state: str
+    reason: str | None = None
+    warnings: tuple[str, ...] = ()
+    classification: str | None = None
+    direction: str | None = None  # crowding only: fade direction SHORT/LONG
+    verdict: str | None = None
+    confidence: str | None = None
+    verdict_reason: str | None = None
+    stop_reference: float | None = None
+    entry_trigger: str | None = None
+    data_date: str | None = None
+    as_of: str | None = None
+    age_days: int | None = None
+    report_path: str | None = None
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        if self.kind == STEP_CROWDING:
+            return {
+                "state": self.state,
+                "classification": self.classification,
+                "data_date": self.data_date,
+                "age_days": self.age_days,
+                "report_path": self.report_path,
+            }
+        if self.kind == STEP_NEWS:
+            return {
+                "state": self.state,
+                "verdict": self.verdict,
+                "confidence": self.confidence,
+                "verdict_reason": self.verdict_reason,
+                "as_of": self.as_of,
+                "age_days": self.age_days,
+                "report_path": self.report_path,
+            }
+        return {  # STEP_PRICE
+            "state": self.state,
+            "verdict": self.verdict,
+            "confidence": self.confidence,
+            "verdict_reason": self.verdict_reason,
+            "stop_reference": self.stop_reference,
+            "as_of": self.as_of,
+            "age_days": self.age_days,
+            "report_path": self.report_path,
+        }
+
+
+def pending_input(kind: str) -> NormalizedInput:
+    """The normalized state for a step whose report file was not provided."""
+    return NormalizedInput(kind=kind, state=STATE_PENDING)
+
+
+# --- Shared helpers --------------------------------------------------------
+
+
+def _is_supported_schema(value: Any) -> bool:
+    """Accept schema major version "1" (e.g. "1.0", "1.4"); reject anything
+    else, including missing/non-string/other-major values (fail closed)."""
+    if not isinstance(value, str) or not value:
+        return False
+    return value.split(".", 1)[0] == "1"
+
+
+def _parse_as_of_date(as_of: str) -> date:
+    return datetime.strptime(as_of, "%Y-%m-%d").date()
+
+
+def _resolve_vintage(raw_value: Any, as_of_dt: date, max_age_days: int) -> tuple[str, int | None]:
+    """Resolve a report's vintage string (detector `data_date` or
+    news/price `run_context.as_of`) against `as_of_dt`.
+
+    Returns (status, age_days) where status is one of "missing" (None/""),
+    "invalid" (not a string, or unparsable), "future" (dated after
+    as_of_dt), "stale" (older than max_age_days), or "ok". Mirrors the
+    proven guard sequence in technical-analyst's
+    resolve_direction_from_detector() and news-reaction-failure-analyzer's
+    counterpart: type guard before slicing, no as_of-for-data_date
+    fallback, age computed only once the value is known-good.
+    """
+    if raw_value is None or raw_value == "":
+        return "missing", None
+    if not isinstance(raw_value, str):
+        return "invalid", None
+    try:
+        value_dt = datetime.strptime(raw_value[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return "invalid", None
+    age_days = (as_of_dt - value_dt).days
+    if age_days < 0:
+        return "future", age_days
+    if age_days > max_age_days:
+        return "stale", age_days
+    return "ok", age_days
+
+
+def _near_stale(age_days: int, max_age_days: int) -> bool:
+    return (max_age_days - age_days) <= NEAR_STALE_WINDOW_DAYS
+
+
+def _resolve_stop_reference(raw_data: dict[str, Any]) -> float | None:
+    """handoff.price_action.stop_reference, falling back to top-level
+    swing_levels.stop_reference when handoff is absent (plan §3.1)."""
+    handoff = raw_data.get("handoff")
+    if isinstance(handoff, dict):
+        price_action = handoff.get("price_action")
+        if isinstance(price_action, dict):
+            value = price_action.get("stop_reference")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+    swing_levels = raw_data.get("swing_levels")
+    if isinstance(swing_levels, dict):
+        value = swing_levels.get("stop_reference")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _build_entry_trigger(raw_data: dict[str, Any], verdict_reason: Any) -> str | None:
+    """Factual echo of the TA confirming signal: `verdict_reason` plus the
+    matching check's `week_of`, when both are resolvable. Never raises on
+    an unexpected shape -- degrades to a shorter echo, or None."""
+    if not isinstance(verdict_reason, str) or not verdict_reason:
+        return None
+    week_of = None
+    checks = raw_data.get("checks")
+    if isinstance(checks, dict):
+        check_key = CHECK_REASON_TO_KEY.get(verdict_reason)
+        if check_key:
+            check = checks.get(check_key)
+            if isinstance(check, dict):
+                candidate = check.get("week_of")
+                if isinstance(candidate, str) and candidate:
+                    week_of = candidate
+    if week_of:
+        return f"price-action confirmation: {verdict_reason} at week_of={week_of}"
+    return f"price-action confirmation: {verdict_reason}"
+
+
+# --- Per-step normalization -------------------------------------------------
+
+
+def normalize_crowding(
+    raw_data: Any,
+    load_error: str | None,
+    *,
+    symbol: str,
+    as_of: str,
+    max_age_days: int,
+    report_path: str | None = None,
+) -> NormalizedInput:
+    """Normalize a cot-contrarian-detector report for `symbol`.
+
+    CROWDED_LONG/CROWDED_SHORT -> CONFIRMED (direction = fade side).
+    NEUTRAL -> NOT_CONFIRMED (measurably not crowded, an explicit
+    negative -- not an insufficiency). Symbol absent from markets[] or
+    present in skipped[] -> INSUFFICIENT (detector_missing_symbol).
+    Everything else fails closed to INVALID with a named reason.
+    """
+    kind = STEP_CROWDING
+    if load_error == "unreadable":
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason="detector_unreadable", report_path=report_path
+        )
+    if load_error == "parse_error":
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason="detector_parse_error", report_path=report_path
+        )
+    if not isinstance(raw_data, dict):
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason="detector_malformed", report_path=report_path
+        )
+
+    if not _is_supported_schema(raw_data.get("schema_version")):
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason="detector_schema_unsupported",
+            report_path=report_path,
+        )
+
+    run_context = raw_data.get("run_context")
+    run_context = run_context if isinstance(run_context, dict) else {}
+    markets_raw = raw_data.get("markets")
+    markets = markets_raw if isinstance(markets_raw, list) else []
+    skipped_raw = raw_data.get("skipped")
+    skipped_list = skipped_raw if isinstance(skipped_raw, list) else []
+    skipped_symbols = {s.get("symbol") for s in skipped_list if isinstance(s, dict)}
+
+    # Duplicate symbol rows in markets[] -> first match wins (the `next()`
+    # pattern the detector itself uses; plan §3.2 v2 P2-7).
+    market_row = next(
+        (m for m in markets if isinstance(m, dict) and m.get("symbol") == symbol), None
+    )
+    if market_row is None or symbol in skipped_symbols:
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INSUFFICIENT,
+            reason="detector_missing_symbol",
+            report_path=report_path,
+        )
+
+    data_date = run_context.get("data_date")
+    as_of_dt = _parse_as_of_date(as_of)
+    status, age_days = _resolve_vintage(data_date, as_of_dt, max_age_days)
+    if status == "missing":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason="detector_missing_data_date",
+            report_path=report_path,
+        )
+    if status == "invalid":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason="detector_invalid_data_date",
+            report_path=report_path,
+        )
+    if status == "future":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason="detector_future_data_date",
+            data_date=data_date,
+            age_days=age_days,
+            report_path=report_path,
+        )
+    if status == "stale":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason="detector_json_stale",
+            data_date=data_date,
+            age_days=age_days,
+            report_path=report_path,
+        )
+
+    assert age_days is not None  # status == "ok" always sets age_days
+    warnings: list[str] = []
+    if _near_stale(age_days, max_age_days):
+        warnings.append("detector_near_stale")
+    row_data_date = market_row.get("data_date")
+    if isinstance(row_data_date, str) and row_data_date and row_data_date != data_date:
+        warnings.append("detector_data_date_divergence")
+
+    classification = market_row.get("classification")
+    if classification == "NEUTRAL":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_NOT_CONFIRMED,
+            reason="detector_not_crowded",
+            classification=classification,
+            data_date=data_date,
+            age_days=age_days,
+            warnings=tuple(warnings),
+            report_path=report_path,
+        )
+    if classification not in FADE_DIRECTION:
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason="detector_unknown_classification",
+            classification=classification,
+            data_date=data_date,
+            age_days=age_days,
+            warnings=tuple(warnings),
+            report_path=report_path,
+        )
+    return NormalizedInput(
+        kind=kind,
+        state=STATE_CONFIRMED,
+        classification=classification,
+        direction=FADE_DIRECTION[classification],
+        data_date=data_date,
+        age_days=age_days,
+        warnings=tuple(warnings),
+        report_path=report_path,
+    )
+
+
+def _normalize_downstream_report(
+    raw_data: Any,
+    load_error: str | None,
+    *,
+    kind: str,
+    symbol: str,
+    as_of: str,
+    max_age_days: int,
+    detector: NormalizedInput,
+    report_path: str | None,
+    valid_verdicts: set[str],
+    verdict_to_state: dict[str, str],
+    prefix: str,
+) -> NormalizedInput:
+    """Shared normalization body for news-failure and price-action reports
+    (both share the same top-level shape: symbol/direction/verdict/
+    confidence/verdict_reason/run_context.as_of). Only price-action needs
+    the extra stop_reference/entry_trigger handling, layered on by its own
+    wrapper below."""
+    if load_error == "unreadable":
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason=f"{prefix}_unreadable", report_path=report_path
+        )
+    if load_error == "parse_error":
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason=f"{prefix}_parse_error", report_path=report_path
+        )
+    if not isinstance(raw_data, dict):
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason=f"{prefix}_malformed", report_path=report_path
+        )
+    if any(key not in raw_data for key in REQUIRED_REPORT_KEYS):
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason=f"{prefix}_malformed", report_path=report_path
+        )
+
+    report_symbol = raw_data.get("symbol")
+    if (
+        not isinstance(report_symbol, str)
+        or report_symbol.strip().upper() != symbol.strip().upper()
+    ):
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_symbol_mismatch",
+            report_path=report_path,
+        )
+
+    return _validated_report_input(
+        raw_data,
+        kind=kind,
+        as_of=as_of,
+        max_age_days=max_age_days,
+        detector=detector,
+        report_path=report_path,
+        valid_verdicts=valid_verdicts,
+        verdict_to_state=verdict_to_state,
+        prefix=prefix,
+    )
+
+
+def _validated_report_input(
+    raw_data: dict[str, Any],
+    *,
+    kind: str,
+    as_of: str,
+    max_age_days: int,
+    detector: NormalizedInput,
+    report_path: str | None,
+    valid_verdicts: set[str],
+    verdict_to_state: dict[str, str],
+    prefix: str,
+) -> NormalizedInput:
+    run_context = raw_data.get("run_context")
+    run_context = run_context if isinstance(run_context, dict) else {}
+
+    schema_source = run_context if prefix == "price_action" else raw_data
+    if not _is_supported_schema(schema_source.get("schema_version")):
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_schema_unsupported",
+            report_path=report_path,
+        )
+
+    report_direction = raw_data.get("direction")
+    if report_direction is None:
+        # The report's own direction resolution failed upstream (e.g.
+        # NRF's no_direction_provided early exit) -- this is that input's
+        # own fail-closed insufficiency, not a mismatch against the
+        # detector. Comparing None != detector.classification below would
+        # otherwise always be truthy and misreport this as
+        # `<prefix>_direction_mismatch` (P3-1).
+        fallback_reason = raw_data.get("verdict_reason")
+        if isinstance(fallback_reason, str) and fallback_reason:
+            return NormalizedInput(
+                kind=kind,
+                state=STATE_INSUFFICIENT,
+                reason=fallback_reason,
+                verdict=raw_data.get("verdict"),
+                confidence=raw_data.get("confidence"),
+                verdict_reason=fallback_reason,
+                report_path=report_path,
+            )
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason=f"{prefix}_malformed", report_path=report_path
+        )
+    if detector.state == STATE_CONFIRMED and report_direction != detector.classification:
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_direction_mismatch",
+            report_path=report_path,
+        )
+
+    as_of_value = run_context.get("as_of")
+    as_of_dt = _parse_as_of_date(as_of)
+    status, age_days = _resolve_vintage(as_of_value, as_of_dt, max_age_days)
+    if status == "missing":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_missing_as_of",
+            report_path=report_path,
+        )
+    if status == "invalid":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_invalid_as_of",
+            report_path=report_path,
+        )
+    if status == "future":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_future_as_of",
+            as_of=as_of_value,
+            age_days=age_days,
+            report_path=report_path,
+        )
+    if status == "stale":
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_json_stale",
+            as_of=as_of_value,
+            age_days=age_days,
+            report_path=report_path,
+        )
+
+    assert age_days is not None
+    warnings: list[str] = []
+    if _near_stale(age_days, max_age_days):
+        warnings.append(f"{prefix}_near_stale")
+
+    verdict = raw_data.get("verdict")
+    verdict_reason = raw_data.get("verdict_reason")
+    confidence = raw_data.get("confidence")
+
+    if verdict not in valid_verdicts:
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_unknown_verdict",
+            verdict=verdict,
+            as_of=as_of_value,
+            age_days=age_days,
+            report_path=report_path,
+        )
+
+    state = verdict_to_state[verdict]
+    if state == STATE_CONFIRMED and prefix == "price_action":
+        stop_reference = _resolve_stop_reference(raw_data)
+        if stop_reference is None:
+            return NormalizedInput(
+                kind=kind,
+                state=STATE_INVALID,
+                reason="price_action_missing_stop_reference",
+                verdict=verdict,
+                confidence=confidence,
+                verdict_reason=verdict_reason,
+                as_of=as_of_value,
+                age_days=age_days,
+                warnings=tuple(warnings),
+                report_path=report_path,
+            )
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_CONFIRMED,
+            verdict=verdict,
+            confidence=confidence,
+            verdict_reason=verdict_reason,
+            stop_reference=stop_reference,
+            entry_trigger=_build_entry_trigger(raw_data, verdict_reason),
+            as_of=as_of_value,
+            age_days=age_days,
+            warnings=tuple(warnings),
+            report_path=report_path,
+        )
+
+    reason = (
+        verdict_reason
+        if isinstance(verdict_reason, str) and verdict_reason
+        else f"{prefix}_{state.lower()}"
+    )
+    return NormalizedInput(
+        kind=kind,
+        state=state,
+        reason=reason if state != STATE_CONFIRMED else None,
+        verdict=verdict,
+        confidence=confidence,
+        verdict_reason=verdict_reason,
+        as_of=as_of_value,
+        age_days=age_days,
+        warnings=tuple(warnings),
+        report_path=report_path,
+    )
+
+
+def normalize_news(
+    raw_data: Any,
+    load_error: str | None,
+    *,
+    symbol: str,
+    as_of: str,
+    max_age_days: int,
+    detector: NormalizedInput,
+    report_path: str | None = None,
+) -> NormalizedInput:
+    """Normalize a news-reaction-failure-analyzer report for `symbol`."""
+    return _normalize_downstream_report(
+        raw_data,
+        load_error,
+        kind=STEP_NEWS,
+        symbol=symbol,
+        as_of=as_of,
+        max_age_days=max_age_days,
+        detector=detector,
+        report_path=report_path,
+        valid_verdicts=NEWS_VERDICTS,
+        verdict_to_state={
+            "CONFIRMED": STATE_CONFIRMED,
+            "NOT_CONFIRMED": STATE_NOT_CONFIRMED,
+            "INSUFFICIENT_EVIDENCE": STATE_INSUFFICIENT,
+        },
+        prefix="news",
+    )
+
+
+def normalize_price_action(
+    raw_data: Any,
+    load_error: str | None,
+    *,
+    symbol: str,
+    as_of: str,
+    max_age_days: int,
+    detector: NormalizedInput,
+    report_path: str | None = None,
+) -> NormalizedInput:
+    """Normalize a technical-analyst contrarian-confirmation report for
+    `symbol`. schema_version is read from `run_context.schema_version`
+    (TA carries no top-level key -- reading top-level here would silently
+    disable the check; plan §3.2 v2 P1-3)."""
+    return _normalize_downstream_report(
+        raw_data,
+        load_error,
+        kind=STEP_PRICE,
+        symbol=symbol,
+        as_of=as_of,
+        max_age_days=max_age_days,
+        detector=detector,
+        report_path=report_path,
+        valid_verdicts=PRICE_VERDICTS,
+        verdict_to_state={
+            "CONFIRMED": STATE_CONFIRMED,
+            "NOT_CONFIRMED": STATE_NOT_CONFIRMED,
+            "INSUFFICIENT_DATA": STATE_INSUFFICIENT,
+        },
+        prefix="price_action",
+    )
+
+
+# --- State machine -----------------------------------------------------
+
+
+def decide_setup_status(
+    crowding: NormalizedInput, news: NormalizedInput, price: NormalizedInput
+) -> tuple[str, list[dict[str, Any]], list[str]]:
+    """Apply the precedence rules (module docstring) to the three
+    normalized inputs. Returns (setup_status, missing_confirmations,
+    extra_warnings) -- `extra_warnings` holds machine-level warnings (only
+    `out_of_order_price_action` today); per-input warnings are merged by
+    the caller (`build_gate_result`)."""
+    missing: list[dict[str, Any]] = []
+    extra_warnings: list[str] = []
+
+    # Rule 1: crowding evaluated first and exclusively.
+    if crowding.state in (STATE_INVALID, STATE_INSUFFICIENT):
+        missing.append({"step": STEP_CROWDING, "state": crowding.state, "reason": crowding.reason})
+        return "INSUFFICIENT_EVIDENCE", missing, extra_warnings
+    if crowding.state == STATE_NOT_CONFIRMED:
+        missing.append(
+            {
+                "step": STEP_CROWDING,
+                "state": STATE_NOT_CONFIRMED,
+                "reason": crowding.reason or "detector_not_crowded",
+            }
+        )
+        return "REJECTED", missing, extra_warnings
+
+    # Crowding is CONFIRMED from here.
+    downstream = ((STEP_NEWS, news), (STEP_PRICE, price))
+
+    # Rule 2: any provided news/price INVALID -> INSUFFICIENT_EVIDENCE.
+    invalid_steps = [(step, inp) for step, inp in downstream if inp.state == STATE_INVALID]
+    if invalid_steps:
+        for step, inp in invalid_steps:
+            missing.append({"step": step, "state": inp.state, "reason": inp.reason})
+        return "INSUFFICIENT_EVIDENCE", missing, extra_warnings
+
+    # Rule 3: any NOT_CONFIRMED -> REJECTED.
+    not_confirmed_steps = [
+        (step, inp) for step, inp in downstream if inp.state == STATE_NOT_CONFIRMED
+    ]
+    if not_confirmed_steps:
+        for step, inp in not_confirmed_steps:
+            missing.append({"step": step, "state": inp.state, "reason": inp.reason})
+        return "REJECTED", missing, extra_warnings
+
+    # Rule 4: any provided INSUFFICIENT -> INSUFFICIENT_EVIDENCE.
+    insufficient_steps = [
+        (step, inp) for step, inp in downstream if inp.state == STATE_INSUFFICIENT
+    ]
+    if insufficient_steps:
+        for step, inp in insufficient_steps:
+            missing.append({"step": step, "state": inp.state, "reason": inp.reason})
+        return "INSUFFICIENT_EVIDENCE", missing, extra_warnings
+
+    # From here, news/price can only be CONFIRMED or PENDING.
+    # Rule 5: out-of-order use (price confirmed while news still pending)
+    # caps at CROWDED with a warning.
+    if price.state == STATE_CONFIRMED and news.state == STATE_PENDING:
+        missing.append({"step": STEP_NEWS, "state": STATE_PENDING, "reason": "pending_step"})
+        extra_warnings.append("out_of_order_price_action")
+        return "CROWDED", missing, extra_warnings
+
+    # Rule 6: crowding only.
+    if news.state == STATE_PENDING and price.state == STATE_PENDING:
+        missing.append({"step": STEP_NEWS, "state": STATE_PENDING, "reason": "pending_step"})
+        missing.append({"step": STEP_PRICE, "state": STATE_PENDING, "reason": "pending_step"})
+        return "CROWDED", missing, extra_warnings
+
+    # Rule 7: crowding + news, price pending.
+    if news.state == STATE_CONFIRMED and price.state == STATE_PENDING:
+        missing.append({"step": STEP_PRICE, "state": STATE_PENDING, "reason": "pending_step"})
+        return "WATCHING_PRICE", missing, extra_warnings
+
+    # Rule 8: all three confirmed.
+    if news.state == STATE_CONFIRMED and price.state == STATE_CONFIRMED:
+        return "READY_FOR_PLAN", missing, extra_warnings
+
+    raise AssertionError(  # pragma: no cover - exhaustively covered above
+        f"unreachable state combination: C={crowding.state} N={news.state} P={price.state}"
+    )
+
+
+def _weakest_confidence(a: str | None, b: str | None) -> str | None:
+    values = [v for v in (a, b) if v is not None]
+    if not values:
+        return None
+    return min(values, key=lambda v: CONFIDENCE_RANK.get(v, 0))
+
+
+def build_gate_result(
+    *,
+    symbol: str,
+    crowding: NormalizedInput,
+    news: NormalizedInput,
+    price: NormalizedInput,
+    max_detector_age_days: int,
+    max_report_age_days: int,
+    as_of: str,
+) -> dict[str, Any]:
+    """Compose the full output contract (plan §2) from three normalized
+    inputs. Pure: no I/O, deterministic given its inputs."""
+    setup_status, missing_confirmations, extra_warnings = decide_setup_status(crowding, news, price)
+
+    direction = crowding.direction if crowding.state == STATE_CONFIRMED else None
+
+    gate_confidence: str | None = None
+    entry_trigger: str | None = None
+    invalidation_level: float | None = None
+    if setup_status == "READY_FOR_PLAN":
+        gate_confidence = _weakest_confidence(news.confidence, price.confidence)
+        entry_trigger = price.entry_trigger
+        invalidation_level = price.stop_reference
+
+    warnings = list(extra_warnings)
+    warnings.extend(crowding.warnings)
+    warnings.extend(news.warnings)
+    warnings.extend(price.warnings)
+    if setup_status == "READY_FOR_PLAN":
+        if price.confidence == "MEDIUM":
+            warnings.append("price_action_confidence_medium")
+        if news.confidence == "MEDIUM":
+            warnings.append("news_confidence_medium")
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "symbol": symbol,
+        "setup_status": setup_status,
+        "direction": direction,
+        "gate_confidence": gate_confidence,
+        "entry_trigger": entry_trigger,
+        "invalidation_level": invalidation_level,
+        "missing_confirmations": missing_confirmations,
+        "warnings": warnings,
+        "inputs": {
+            STEP_CROWDING: crowding.to_audit_dict(),
+            STEP_NEWS: news.to_audit_dict(),
+            STEP_PRICE: price.to_audit_dict(),
+        },
+        "run_context": {
+            "symbol": symbol,
+            "as_of": as_of,
+            "max_detector_age_days": max_detector_age_days,
+            "max_report_age_days": max_report_age_days,
+            "schema_version": SCHEMA_VERSION,
+            "skill": SKILL_NAME,
+        },
+    }
