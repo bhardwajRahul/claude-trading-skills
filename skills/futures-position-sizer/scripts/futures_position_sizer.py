@@ -127,6 +127,21 @@ def _as_of_type(value: str) -> str:
     return value
 
 
+def _symbol_type(value: str) -> str:
+    """--symbol must be a plain, filename-safe alphanumeric token (see
+    `futures_sizing.SYMBOL_PATTERN`) -- the SAME allowlist
+    `normalize_gate_report` applies to an untrusted gate-report file's own
+    `symbol` field (user review round 3, P1-3c). An operator typo here is
+    a usage error, exit 2, symmetric with how a gate file's invalid symbol
+    becomes a fail-closed `gate_json_malformed` NO_TRADE report."""
+    stripped = value.strip()
+    if not fs.is_valid_symbol(stripped):
+        raise argparse.ArgumentTypeError(
+            f"--symbol must be 1-12 plain alphanumeric characters, got {value!r}"
+        )
+    return stripped.upper()
+
+
 # Sane upper bounds for numeric flags whose PRODUCT feeds risk math (never
 # individually implausible, but an extreme value on one of these combined
 # with another can overflow float64 before the defense-in-depth isfinite()
@@ -148,7 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
         "READY_FOR_PLAN report handoff.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--symbol", help="Futures ticker, e.g. ES (required in explicit mode)")
+    parser.add_argument(
+        "--symbol", type=_symbol_type, help="Futures ticker, e.g. ES (required in explicit mode)"
+    )
     parser.add_argument("--direction", choices=["LONG", "SHORT"], help="Explicit mode only")
     parser.add_argument("--entry", type=_strict_float_type(), help="Entry price (always required)")
     parser.add_argument("--stop", type=_strict_float_type(), help="Explicit mode only")

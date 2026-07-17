@@ -106,6 +106,28 @@ class TestStrictNonNegInt:
         with pytest.raises(ValueError):
             fs.strict_nonneg_int("inf")
 
+    def test_rejects_nan(self):
+        with pytest.raises(ValueError):
+            fs.strict_nonneg_int("nan")
+
+    # --- Code review round 3 (user re-review), P2-4: a value beyond
+    # float64's 2**53 exact-integer range used to silently round-trip to a
+    # DIFFERENT integer via the old float()-based parser, making the "hard
+    # cap" --max-contracts exists to provide exceedable by one.
+
+    def test_p2_4_beyond_2_pow_53_round_trips_exactly(self):
+        # 2**53 = 9007199254740992; this value is 3 above it and is NOT
+        # exactly representable as a float64 -- float("9007199254740995")
+        # rounds to 9007199254740996.0, a different integer. int() must
+        # parse it exactly regardless.
+        value = "9007199254740995"
+        assert float(value) != 9_007_199_254_740_995  # confirms the float trap is real here
+        assert fs.strict_nonneg_int(value) == 9_007_199_254_740_995
+
+    def test_much_larger_than_2_pow_53_still_exact(self):
+        value = str(2**100 + 7)
+        assert fs.strict_nonneg_int(value) == 2**100 + 7
+
 
 # --- Floor algorithm (PINNED, relative epsilon) -----------------------------
 
@@ -130,9 +152,10 @@ class TestComputeContracts:
         budget = 250.0
         assert fs.compute_contracts(budget, rpc) == 2
 
-    def test_large_scale_relative_nudge_stays_correct(self):
-        # q ~ 1e5: relative epsilon must still recover an exact multiple
-        # without ever rounding up a genuine fractional remainder at scale.
+    def test_large_scale_exact_multiple_still_recovers_under_count(self):
+        # q ~ 1e5: the (now absolute) epsilon must still recover an exact
+        # multiple lost to float noise, without ever rounding up a genuine
+        # fractional remainder.
         rpc = 1012.50
         budget = rpc * 100_000
         assert fs.compute_contracts(budget, rpc) == 100_000
@@ -152,6 +175,33 @@ class TestComputeContracts:
 
     def test_max_contracts_none_means_uncapped(self):
         assert fs.compute_contracts(1000.0, 100.0, max_contracts=None) == 10
+
+    # --- Code review round 3, P1-1: relative epsilon rounded UP past the
+    # actual risk budget at large q. Reverted to absolute epsilon + a hard
+    # post-condition invariant that is the real correctness guarantee. ---
+
+    def test_p1_1_exact_repro_does_not_round_up_past_budget(self):
+        # Exact reviewer repro: budget=$99,999,999,950, rpc=$1,000 ->
+        # q=99999999.95 (a true 0.05-contract shortfall). The relative-
+        # epsilon bug rounded this UP to 100,000,000 -- $50 over budget,
+        # still SIZED. Must floor down to 99999999.
+        budget = 99_999_999_950.0
+        rpc = 1_000.0
+        contracts = fs.compute_contracts(budget, rpc)
+        assert contracts == 99_999_999
+        assert contracts * rpc <= budget
+
+    def test_invariant_holds_across_a_scale_sweep(self):
+        # The hard post-condition must hold (contracts * rpc <= budget)
+        # regardless of scale -- this is the actual guarantee, not the
+        # epsilon's sizing. Sweep several orders of magnitude, each with a
+        # genuine, deliberately non-round fractional shortfall.
+        for rpc in (0.30000000000000004, 1.0, 1012.50, 1_000.0, 7.8125):
+            for k in (1, 2, 100, 100_000, 10**8):
+                budget = rpc * k - 0.5 * rpc  # a true (k - 0.5)x budget
+                contracts = fs.compute_contracts(budget, rpc)
+                assert contracts * rpc <= budget, (rpc, k, contracts, budget)
+                assert contracts <= k - 1, (rpc, k, contracts)
 
 
 # --- Geometry ---------------------------------------------------------------
@@ -474,6 +524,44 @@ class TestSizeFuturesPositionOverflowGuards:
         assert result["risk_budget_usd"] == pytest.approx(1e12 * 1.0 / 100.0)
         assert math.isfinite(result["risk_budget_usd"])
 
+    # --- Code review round 3, P1-2: denormal underflow -> risk_per_contract
+    # == 0.0 -> ZeroDivisionError inside compute_contracts(), exit 1. 0.0 is
+    # perfectly finite, so the isfinite() guard alone never caught this. ---
+
+    def test_p1_2_denormal_underflow_raises_config_error_not_zerodiv(self):
+        # Exact reviewer repro: entry/stop/multiplier/tick_size all ~1e-308
+        # (individually finite and positive, passing every validator), but
+        # distance * multiplier underflows to exactly 0.0.
+        denormal_spec = dict(ES_SPEC, multiplier=1e-308, tick_size=1e-308, tick_value=1e-616)
+        assert 2e-308 * 1e-308 == 0.0  # confirms this repro underflows in this environment
+        with pytest.raises(fs.ConfigError) as exc_info:
+            fs.size_futures_position(
+                **self.base_kwargs(entry=2e-308, stop=1e-308, spec=denormal_spec)
+            )
+        assert exc_info.value.reason == "risk_per_contract_non_positive"
+
+    def test_risk_per_contract_exactly_zero_raises_config_error(self):
+        # Direct construction (not relying on the exact underflow repro
+        # above continuing to underflow identically on every platform).
+        zero_multiplier_spec = dict(ES_SPEC, multiplier=0.0, tick_value=0.0)
+        with pytest.raises(fs.ConfigError) as exc_info:
+            fs.size_futures_position(**self.base_kwargs(spec=zero_multiplier_spec))
+        assert exc_info.value.reason == "risk_per_contract_non_positive"
+
+    def test_quotient_overflow_raises_config_error(self):
+        # Follow-up to P1-2: risk_per_contract can be finite and POSITIVE
+        # (not underflowed to exactly 0.0) yet still so tiny relative to a
+        # large-but-capped risk_budget that the QUOTIENT itself overflows
+        # to inf -- caught inside compute_contracts(), not by the
+        # risk_per_contract guard (which only checks risk_per_contract
+        # itself, not the quotient).
+        tiny_spec = dict(ES_SPEC, multiplier=1e-300, tick_size=0.25, tick_value=2.5e-301)
+        with pytest.raises(fs.ConfigError) as exc_info:
+            fs.size_futures_position(
+                **self.base_kwargs(spec=tiny_spec, account_size=1e12, risk_pct=10.0)
+            )
+        assert exc_info.value.reason == "contracts_quotient_overflow"
+
 
 # --- size_futures_position: mode B (gate-supplied stop) --------------------
 
@@ -590,6 +678,40 @@ class TestNormalizeGateReport:
         g = fs.normalize_gate_report(_ready_gate_report(), None, symbol="ES")
         assert g.usable is False
         assert g.reason == "gate_symbol_mismatch"
+
+    # --- Code review round 3 (user re-review), P1-3: an invalid gate-file
+    # symbol used to slip past validation (whitespace-only) or reach an
+    # output filename unsanitized (path-hostile characters). Both must now
+    # fail closed as gate_json_malformed -- exit 0, a report IS written,
+    # naming the reason -- never a crash and never an unsafe filename.
+
+    def test_whitespace_only_symbol_is_malformed_not_usable(self):
+        # A non-empty string of spaces is truthy in Python, so a naive
+        # `not report_symbol` check does NOT catch this -- it must be
+        # caught by validating the STRIPPED value against the allowlist.
+        g = fs.normalize_gate_report(_ready_gate_report(symbol="   "), None, symbol=None)
+        assert g.usable is False
+        assert g.reason == "gate_json_malformed"
+
+    def test_path_hostile_symbol_is_malformed_not_usable(self):
+        # "A/B" must never become GateNormalized.symbol -- it would
+        # otherwise flow straight into an output filename path component.
+        g = fs.normalize_gate_report(_ready_gate_report(symbol="A/B"), None, symbol=None)
+        assert g.usable is False
+        assert g.reason == "gate_json_malformed"
+        assert g.symbol is None
+
+    def test_symbol_with_leading_trailing_whitespace_is_normalized_and_accepted(self):
+        # A genuinely valid symbol surrounded by incidental whitespace
+        # should still work -- strip-then-validate, not reject outright.
+        g = fs.normalize_gate_report(_ready_gate_report(symbol="  B6  "), None, symbol=None)
+        assert g.usable is True
+        assert g.symbol == "B6"
+
+    def test_overlong_symbol_is_malformed(self):
+        g = fs.normalize_gate_report(_ready_gate_report(symbol="A" * 13), None, symbol=None)
+        assert g.usable is False
+        assert g.reason == "gate_json_malformed"
 
     def test_symbol_taken_from_report_when_omitted(self):
         g = fs.normalize_gate_report(_ready_gate_report(), None, symbol=None)

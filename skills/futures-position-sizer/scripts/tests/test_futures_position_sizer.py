@@ -196,6 +196,33 @@ class TestNumericValidatorsRejectDegenerateValues:
         result = _run_cli(args)
         assert result.returncode == 0
 
+    def test_max_contracts_beyond_2_pow_53_parses_exactly(self, tmp_path):
+        # Code review round 3, P2-4: a --max-contracts value beyond
+        # float64's exact-integer range must parse without precision
+        # loss -- this is far above any real cap, so it's never actually
+        # binding here, but it must not be silently coerced to a
+        # different integer or crash.
+        out_dir = tmp_path / "reports"
+        args = [
+            *self.BASE_ARGS,
+            "--max-contracts",
+            "9007199254740995",
+            "--output-dir",
+            str(out_dir),
+        ]
+        result = _run_cli(args)
+        assert result.returncode == 0
+
+    @pytest.mark.parametrize("bad_value", ["1.0", "1e2", "1,000"])
+    def test_max_contracts_rejects_non_integer_syntax(self, bad_value):
+        # int()-based parsing is intentionally stricter than the old
+        # float()-based one: a decimal point or exponent notation is never
+        # valid --max-contracts syntax now, even when mathematically a
+        # whole number.
+        args = [*self.BASE_ARGS, "--max-contracts", bad_value]
+        result = _run_cli(args)
+        assert result.returncode == 2
+
     @pytest.mark.parametrize("bad_value", ["inf", "nan", "1e309", "0", "-1.2"])
     def test_fx_rate_rejects_degenerate_values(self, bad_value):
         args = [*self.BASE_ARGS, "--fx-rate", bad_value]
@@ -439,6 +466,63 @@ class TestOverflowGuards:
         assert result.returncode == 2
         assert "Traceback" not in result.stderr
         assert "32nds" in result.stderr
+        assert not out_dir.exists() or not any(out_dir.iterdir())
+
+
+# --- Section 2c: code review round 3 (user re-review) -----------------------
+# P1-1: floor epsilon rounded contracts UP past the risk budget at large
+# scale. P1-2: denormal underflow (risk_per_contract == 0.0) crashed with
+# ZeroDivisionError, exit 1.
+
+
+class TestBudgetInvariantAndUnderflowGuards:
+    def test_p1_1_exact_repro_never_exceeds_budget_end_to_end(self, tmp_path):
+        # budget = account_size * risk_pct / 100 = 999999999500 * 10 / 100
+        # = 99,999,999,950.0; risk_per_contract = distance(10) *
+        # multiplier(100) = 1000.0 -- reproduces the reviewer's exact
+        # q=99999999.95 case end-to-end through the real CLI.
+        out_dir = tmp_path / "reports"
+        args = [
+            "--symbol", "ZZZZ",
+            "--direction", "LONG",
+            "--entry", "100.0",
+            "--stop", "90.0",
+            "--multiplier", "100",
+            "--tick-size", "0.01",
+            "--contract-currency", "USD",
+            "--account-size", "999999999500",
+            "--risk-pct", "10.0",
+            "--as-of", "2026-07-17",
+            "--output-dir", str(out_dir),
+            "--format", "json",
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 0
+        payload = json.loads((out_dir / "futures_position_size_ZZZZ_2026-07-17.json").read_text())
+        assert payload["sizing_status"] == "SIZED"
+        assert payload["contracts"] == 99_999_999
+        assert payload["contracts"] * payload["risk_per_contract_usd"] <= payload["risk_budget_usd"]
+
+    def test_p1_2_denormal_underflow_exits_2_not_1(self, tmp_path):
+        # Exact reviewer repro end-to-end through the real CLI: all four
+        # values individually pass the finite/positive validators, but the
+        # product underflows to exactly 0.0.
+        out_dir = tmp_path / "reports"
+        args = [
+            "--symbol", "ZZZZ",
+            "--direction", "LONG",
+            "--entry", "2e-308",
+            "--stop", "1e-308",
+            "--multiplier", "1e-308",
+            "--tick-size", "1e-308",
+            "--contract-currency", "USD",
+            "--account-size", "100000",
+            "--risk-pct", "1.0",
+            "--output-dir", str(out_dir),
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
         assert not out_dir.exists() or not any(out_dir.iterdir())
 
 
@@ -774,6 +858,94 @@ class TestModeBEndToEnd:
         assert exit_code == 0
         payload = json.loads((out_dir / "futures_position_size_ES_2026-07-17.json").read_text())
         assert payload["no_trade_reason"] == "gate_symbol_mismatch"
+
+    # --- Code review round 3 (user re-review), P1-3 ------------------------
+
+    def test_whitespace_only_gate_symbol_is_no_trade_exit_0(self, tmp_path, monkeypatch):
+        gate_path = tmp_path / "gate.json"
+        gate_path.write_text(json.dumps(_ready_gate_fixture(symbol="   ")), encoding="utf-8")
+        out_dir = tmp_path / "reports"
+        _argv(
+            [
+                "--gate-json",
+                str(gate_path),
+                "--entry",
+                "1.34",
+                "--account-size",
+                "100000",
+                "--risk-pct",
+                "1.0",
+                "--as-of",
+                "2026-07-17",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],  # fmt: skip
+            monkeypatch,
+        )
+        exit_code = cli.main()
+        assert exit_code == 0
+        payload = json.loads(
+            (out_dir / "futures_position_size_UNKNOWN_2026-07-17.json").read_text()
+        )
+        assert payload["sizing_status"] == "NO_TRADE"
+        assert payload["no_trade_reason"] == "gate_json_malformed"
+
+    def test_path_hostile_gate_symbol_is_no_trade_with_safe_filename(self, tmp_path, monkeypatch):
+        # "A/B" must never reach the output filename -- with no --symbol
+        # given to fall back on, the CLI must resolve to the safe literal
+        # "UNKNOWN", not crash with FileNotFoundError writing into a
+        # nonexistent "futures_position_size_A" subdirectory.
+        gate_path = tmp_path / "gate.json"
+        gate_path.write_text(json.dumps(_ready_gate_fixture(symbol="A/B")), encoding="utf-8")
+        out_dir = tmp_path / "reports"
+        _argv(
+            [
+                "--gate-json",
+                str(gate_path),
+                "--entry",
+                "1.34",
+                "--account-size",
+                "100000",
+                "--risk-pct",
+                "1.0",
+                "--as-of",
+                "2026-07-17",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],  # fmt: skip
+            monkeypatch,
+        )
+        exit_code = cli.main()
+        assert exit_code == 0
+        written_files = list(out_dir.iterdir())
+        assert len(written_files) == 1
+        assert "/" not in written_files[0].name
+        payload = json.loads(written_files[0].read_text())
+        assert payload["sizing_status"] == "NO_TRADE"
+        assert payload["no_trade_reason"] == "gate_json_malformed"
+
+    def test_path_hostile_explicit_symbol_exits_2(self, tmp_path):
+        # The same allowlist applies to an operator-typed --symbol in
+        # explicit mode -- a usage error, exit 2, symmetric with the
+        # gate-file case above being a fail-closed NO_TRADE (exit 0).
+        out_dir = tmp_path / "reports"
+        args = [
+            "--symbol", "A/B",
+            "--direction", "LONG",
+            "--entry", "100.0",
+            "--stop", "90.0",
+            "--account-size", "100000",
+            "--risk-pct", "1.0",
+            "--output-dir", str(out_dir),
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+        assert not out_dir.exists() or not any(out_dir.iterdir())
 
     def test_gate_stop_off_tick_grid_bond_is_no_trade_exit_0(self, tmp_path, monkeypatch):
         gate_path = tmp_path / "gate.json"

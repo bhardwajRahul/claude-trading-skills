@@ -16,16 +16,23 @@ total_risk           = contracts * risk_per_contract            (USD, when SIZED
 
 `fx_rate` converts a non-USD-quoted contract's risk into USD; it is `1.0` for every symbol in the verified core table (all 23 are USD-quoted -- see `futures-contract-specs.md`) and is required, with no default, for any operator-supplied override symbol quoted in another currency.
 
-## The Floor Algorithm (Relative Epsilon, Pinned)
+## The Floor Algorithm (Absolute Epsilon + a Hard Post-Condition Invariant)
 
 ```python
 q = risk_budget / risk_per_contract
-contracts = math.floor(q * (1 + 1e-9))
+contracts = math.floor(q + 1e-9)
+while contracts > 0 and contracts * risk_per_contract > risk_budget:
+    contracts -= 1
 ```
 
-Floating-point division can land a "true" exact multiple (`risk_budget == k * risk_per_contract` for some integer k) a few ULPs *under* `k` due to binary representation error -- a naive `math.floor(q)` would then silently return `k - 1` instead of `k`. The fix is a small **relative** epsilon nudge applied before flooring, not an absolute one: `1e-9` relative is many orders of magnitude smaller than any real fractional shortfall (a genuinely non-integer quotient, e.g. `q = 2.5`, still floors to `2`) yet many orders of magnitude larger than float64's own representation error (~1e-15 relative) **at every scale** -- from a single-digit contract count up through `q` in the hundreds of thousands. This holds by construction, not by manually verifying it at each scale a test happens to check.
+Floating-point division can land a "true" exact multiple (`risk_budget == k * risk_per_contract` for some integer k) a few ULPs *under* `k` due to binary representation error -- a naive `math.floor(q)` would then silently return `k - 1` instead of `k`. An earlier version of this skill used a *relative* epsilon (`math.floor(q * (1 + 1e-9))`) to fix that under-count; an independent user review (round 3, P1-1) found this was a mistake: a relative nudge's *absolute* size grows with `q`, and at a large scale (e.g. `q ~ 1e8` for a big account against a cheap contract) a `1e-9`-relative nudge is already large enough in absolute terms (~0.1) to swallow a *genuine* fractional shortfall -- the reported repro was `q = 99999999.95` (a true 0.05-contract shortfall) rounding UP to `100,000,000` contracts, $50 over the actual risk budget, and still reported as `SIZED`. That is exactly the "never round up" contract this skill exists to enforce, violated by the fix meant to guard a much smaller edge case.
 
-The same relative-epsilon construction is reused for the tick-grid check (`is_on_tick_grid`) and the minimum-stop-distance guard (`meets_min_stop_distance`) -- both need to tolerate float noise around an exact boundary without ever masking a real violation.
+The corrected design has two independent layers, and only the second one is actually load-bearing for correctness:
+
+1. **The epsilon (a nicety, not a guarantee).** A small, *fixed absolute* epsilon (`1e-9`) added before flooring repairs the same float64 under-count the relative version was meant to fix, without growing with scale.
+2. **The hard post-condition (the real guarantee).** After the floor (and epsilon), the code walks `contracts` back down, one at a time if needed, until `contracts * risk_per_contract <= risk_budget` holds exactly in float64 terms. This is what makes "the risk budget is never exceeded" true *by construction*, independent of whatever the epsilon did -- even a mis-sized or removed epsilon could never let a sized position exceed its budget, because this loop is the actual enforcement mechanism, not the epsilon.
+
+The tick-grid check (`is_on_tick_grid`) and the minimum-stop-distance guard (`meets_min_stop_distance`) keep their own *relative* epsilon (unchanged) -- that construction is still correct for them, since tick sizes span multiple orders of magnitude across symbols and a ratio-based (not budget-based) comparison is what they're doing; the relative-epsilon defect specifically affected the contract-count floor, where the "risk_budget / risk_per_contract" quotient's scale set the failure mode.
 
 **Minimum-stop-distance guard.** If the entry/stop distance is less than one tick, sizing is refused rather than silently computing an ultra-high, effectively meaningless contract count from a near-zero `risk_per_contract`. This closes the one regime where any epsilon design gets shaky: a stop distance of a few ULPs would make `risk_per_contract` itself vanishingly small, and even a tiny risk budget would imply an enormous (and nonsensical) contract count.
 

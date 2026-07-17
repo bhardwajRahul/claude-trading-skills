@@ -36,6 +36,7 @@ of every row (official exchange contractSpecs pages only).
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,16 +52,22 @@ SKILL_NAME = "futures-position-sizer"
 # off-grid/mid-quote price is legitimate and only warns).
 BOND_FAMILY = frozenset({"ZT", "ZF", "ZN", "ZB"})
 
-# Relative (not absolute) epsilon for the contract-count floor: this nudge
-# can only ever ADD BACK a contract lost to float64 representation error
-# (e.g. a "true" k * risk_per_contract product that lands a few ULPs under
-# k due to binary rounding) -- it can never round UP a genuinely
-# non-integer quotient, because 1e-9 relative is many orders of magnitude
-# smaller than any real fractional shortfall yet many orders of magnitude
-# larger than float64's own representation error (~1e-15 relative) AT ANY
-# SCALE. This holds by construction, not by manually walking scales (plan
-# v3, review round-2 P2).
-FLOOR_REL_EPSILON = 1e-9
+# ABSOLUTE (not relative) epsilon for the contract-count floor -- a
+# relative epsilon (plan v3, review round-2 P2) was a mistake, caught by
+# independent user review (round 3, P1-1): a RELATIVE nudge's absolute
+# size grows with q (risk_budget / risk_per_contract), and at large q
+# (e.g. q ~ 1e8 for a big account against a cheap contract) a 1e-9-relative
+# nudge is already ~0.1 in absolute terms -- large enough to swallow a
+# GENUINE fractional shortfall (e.g. q = 99999999.95, a true 0.05-contract
+# shortfall) and round the contract count UP past what the risk budget
+# actually supports. A small, fixed ABSOLUTE epsilon repairs the same
+# float64 under-count this was meant to fix (e.g. floor(2.9999999999) -> 2
+# when the true value is exactly 3) without that scale-dependent growth.
+# This alone is still only a NICETY, not the correctness guarantee -- see
+# the hard `while contracts * rpc > budget: contracts -= 1` post-condition
+# in compute_contracts(), which is what actually guarantees the "never
+# exceeds the risk budget" contract regardless of any epsilon subtlety.
+FLOOR_ABS_EPSILON = 1e-9
 
 # Same relative-epsilon construction applied to the tick-grid / minimum-
 # stop-distance guards below, for the identical reason: tolerate float
@@ -70,6 +77,30 @@ FLOOR_REL_EPSILON = 1e-9
 GRID_REL_EPSILON = 1e-9
 
 RISK_PCT_WARNING_THRESHOLD = 2.0
+
+# A "symbol" -- whether from an untrusted gate-report file or an operator
+# CLI flag -- is allowed to become PART OF AN OUTPUT FILENAME
+# (futures_position_size_<SYMBOL>_<as-of>.json) and to be echoed verbatim
+# into JSON/text output. Every core-table and realistic override symbol is
+# 1-6 plain alphanumeric characters (ES, ZB, E6, ZZZZ, ...); this allowlist
+# is deliberately generous (up to 12 chars) while still rejecting the two
+# classes user review round 3 (P1-3) found reaching production code
+# unvalidated: whitespace-only ("   ", which `.strip()`s to an unusable
+# empty resolved symbol) and path-hostile characters (e.g. "A/B", which
+# would otherwise flow straight into a filename path component and either
+# crash with FileNotFoundError -- exit 1 -- or, worse, write outside the
+# intended output directory).
+SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9]{1,12}$")
+
+
+def is_valid_symbol(value: str) -> bool:
+    """True if `value` is a safe, filename-safe, plain-alphanumeric
+    symbol (1-12 characters). Callers must `.strip()` untrusted input
+    BEFORE calling this -- whitespace is never itself part of a valid
+    symbol, but stripping first lets " B6 " normalize to the valid "B6"
+    rather than being rejected outright."""
+    return bool(SYMBOL_PATTERN.match(value))
+
 
 # WEBSEARCH-VERIFIED against official exchange sources (CME Group rulebook
 # chapters / contractSpecs pages, ICE, Cboe) -- see
@@ -388,20 +419,24 @@ def strict_positive_float(value: str, *, max_value: float | None = None) -> floa
 
 
 def strict_nonneg_int(value: str) -> int:
-    """Parse `value` as a finite, non-negative integer (used for
-    --max-contracts, where 0 means "no cap"). Rejects "inf"/"nan" and any
-    non-integral float string ("1.5") -- fractional contract caps make no
-    sense and a truncating `int()` on such a string would silently accept
-    one."""
+    """Parse `value` as an EXACT non-negative integer (used for
+    --max-contracts, where 0 means "no cap" -- a HARD cap that must never
+    be exceedable).
+
+    Parses directly via `int()`, NEVER via `float()` (user review round 3,
+    P2-4): float64 can only represent integers exactly up to 2**53
+    (9,007,199,254,740,992) -- a value like 9007199254740995 would
+    silently round-trip through `float()` to 9007199254740996, a
+    different integer, making the "hard cap" off by one by construction.
+    Python's `int()` has no such limit; it parses an integer-shaped string
+    exactly regardless of magnitude. This also rejects "inf"/"nan" and any
+    non-integral string ("1.5") -- `int()` itself raises `ValueError` on
+    all of these (a decimal point, or "inf"/"nan", is never valid `int()`
+    syntax), which is caught and re-raised with a clearer message."""
     try:
-        parsed_float = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{value!r} is not a valid integer") from exc
-    if not math.isfinite(parsed_float):
-        raise ValueError(f"{value!r} must be finite (not inf/-inf/nan)")
-    if parsed_float != int(parsed_float):
-        raise ValueError(f"{value!r} must be a whole number")
-    parsed_int = int(parsed_float)
+        parsed_int = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{value!r} must be a whole number") from exc
     if parsed_int < 0:
         raise ValueError(f"{value!r} must be >= 0")
     return parsed_int
@@ -540,14 +575,48 @@ def _format_ticks(ticks: float) -> int | float:
 def compute_contracts(
     risk_budget_usd: float, risk_per_contract_usd: float, max_contracts: int | None = None
 ) -> int:
-    """`floor(q * (1 + FLOOR_REL_EPSILON))` where `q = risk_budget /
+    """`floor(q + FLOOR_ABS_EPSILON)` where `q = risk_budget /
     risk_per_contract`, then capped by `max_contracts` (None = uncapped).
-    NEVER rounds up beyond the exact quotient -- a true 2.5 stays 2; the
-    epsilon only recovers a contract lost to float representation error
-    at an exact k * risk_per_contract boundary. See module docstring and
-    plan v3 (review round-2 P2) for the relative-vs-absolute rationale."""
+
+    Two independent layers, per user review round 3 (P1-1):
+
+    1. The epsilon is a NICETY: it recovers a contract lost to float64
+       representation error at an exact k * risk_per_contract boundary
+       (e.g. a "true" 3.0 that landed at 2.9999999999 due to binary
+       rounding). It is deliberately a small, fixed ABSOLUTE value, not a
+       value that scales with q -- see FLOOR_ABS_EPSILON's docstring for
+       why a relative epsilon is unsafe at large q.
+    2. The hard post-condition loop below is the actual CORRECTNESS
+       GUARANTEE: regardless of what the epsilon nudge did, `contracts`
+       is walked back down until `contracts * risk_per_contract_usd <=
+       risk_budget_usd` holds exactly, in float64 terms. This is what
+       makes "never exceeds the risk budget" true BY CONSTRUCTION rather
+       than by trusting the epsilon's sizing -- the epsilon could be
+       wrong, removed, or misapplied elsewhere and this loop would still
+       hold the guarantee.
+
+    NEVER rounds up beyond the exact quotient -- a true 2.5 stays 2.
+
+    Raises `ConfigError` if the quotient itself is not finite: callers
+    already guard `risk_budget_usd` (finite) and `risk_per_contract_usd`
+    (finite and > 0) individually, but the QUOTIENT of two individually
+    reasonable values can still overflow to inf (e.g. a large but capped
+    risk_budget_usd divided by a tiny-but-nonzero risk_per_contract_usd
+    that is far from underflowing to exactly 0.0) -- an uncaught inf `q`
+    would otherwise crash `math.floor()` with `OverflowError` a few lines
+    below (user review round 3, P1-2 follow-up)."""
     q = risk_budget_usd / risk_per_contract_usd
-    contracts = math.floor(q * (1 + FLOOR_REL_EPSILON))
+    if not math.isfinite(q):
+        raise ConfigError(
+            f"computed risk_budget/risk_per_contract quotient is not finite "
+            f"(risk_budget_usd={risk_budget_usd}, "
+            f"risk_per_contract_usd={risk_per_contract_usd}) -- "
+            "risk_per_contract is unreasonably small relative to the risk budget",
+            reason="contracts_quotient_overflow",
+        )
+    contracts = math.floor(q + FLOOR_ABS_EPSILON)
+    while contracts > 0 and contracts * risk_per_contract_usd > risk_budget_usd:
+        contracts -= 1
     if max_contracts is not None and max_contracts > 0:
         contracts = min(contracts, max_contracts)
     return contracts
@@ -817,19 +886,30 @@ def size_futures_position(
     result["stop_distance_points"] = round(distance, 8)
     result["stop_distance_ticks"] = _format_ticks(ticks_exact)
 
-    # Defense-in-depth against float64 overflow: every operand here (entry,
-    # stop, multiplier, fx_rate, account_size, risk_pct) already passed its
-    # own argparse-level max_value cap, but the PRODUCT of several
-    # individually-valid large values can still overflow to inf (e.g. an
-    # extreme --account-size times a double-digit --risk-pct). An
-    # uncaught inf would otherwise reach math.floor() inside
-    # compute_contracts() (raises OverflowError) or the JSON writer's
-    # allow_nan=False (raises ValueError) -- both uncaught crashes, exit 1,
-    # violating the two-class exit contract (2 config / 0 fail-closed
-    # report -- never 1). Both risk_per_contract and risk_budget are
-    # entirely operator-supplied in both modes (never gate-sourced), so a
-    # ConfigError (exit 2, no report) is the correct class here, same as
-    # resolve_spec's and requires_fx_rate's own operator-side errors.
+    # Defense-in-depth against float64 overflow AND underflow: every
+    # operand here (entry, stop, multiplier, fx_rate, account_size,
+    # risk_pct) already passed its own argparse-level max_value cap, but
+    # the PRODUCT of several individually-valid values can still misbehave
+    # two different ways:
+    #   - OVERFLOW: an extreme --account-size times a double-digit
+    #     --risk-pct (or similar) overflows to inf. An uncaught inf would
+    #     otherwise reach math.floor() inside compute_contracts() (raises
+    #     OverflowError) or the JSON writer's allow_nan=False (raises
+    #     ValueError).
+    #   - UNDERFLOW (user review round 3, P1-2): a DENORMAL-range
+    #     combination (e.g. entry/stop/multiplier all ~1e-308, individually
+    #     finite and positive, still pass the strict-positive validators)
+    #     multiplies down to exactly 0.0 rather than overflowing --
+    #     math.isfinite(0.0) is True, so the overflow check alone does NOT
+    #     catch this. An uncaught 0.0 divisor would otherwise reach
+    #     `risk_budget / risk_per_contract_usd` inside compute_contracts()
+    #     and raise ZeroDivisionError.
+    # Both are uncaught crashes, exit 1, violating the two-class exit
+    # contract (2 config / 0 fail-closed report -- never 1). Both
+    # risk_per_contract and risk_budget are entirely operator-supplied in
+    # both modes (never gate-sourced), so a ConfigError (exit 2, no
+    # report) is the correct class here, same as resolve_spec's and
+    # requires_fx_rate's own operator-side errors.
     risk_per_contract = distance * spec["multiplier"] * fx_rate
     if not math.isfinite(risk_per_contract):
         raise ConfigError(
@@ -839,6 +919,16 @@ def size_futures_position(
             "--multiplier/--tick-size/--fx-rate (or an unknown-symbol override), "
             "is unreasonably large",
             reason="risk_per_contract_overflow",
+        )
+    if risk_per_contract <= 0.0:
+        raise ConfigError(
+            f"computed risk_per_contract is not positive (entry={entry}, stop={stop}, "
+            f"stop_distance={distance}, multiplier={spec['multiplier']}, "
+            f"fx_rate={fx_rate}) -- one or more of --entry/--stop (the distance "
+            "between them), --multiplier/--tick-size/--fx-rate (or an "
+            "unknown-symbol override) is too small, causing the product to "
+            "underflow to zero",
+            reason="risk_per_contract_non_positive",
         )
     result["risk_per_contract_usd"] = round(risk_per_contract, 2)
 
@@ -1017,9 +1107,18 @@ def normalize_gate_report(
         return GateNormalized(False, "gate_json_schema_unsupported")
 
     report_symbol = raw_data.get("symbol")
-    if not isinstance(report_symbol, str) or not report_symbol:
+    if not isinstance(report_symbol, str):
         return GateNormalized(False, "gate_json_malformed")
-    report_symbol = report_symbol.strip().upper()
+    # Strip BEFORE validating: a whitespace-only value ("   ") must not
+    # slip past `not report_symbol` (a non-empty string of spaces is
+    # truthy in Python) only to resolve to an unusable empty symbol
+    # downstream -- and a path-hostile value ("A/B") must never reach a
+    # GateNormalized.symbol that later flows into an output FILENAME
+    # (user review round 3, P1-3: both were reachable before this check).
+    report_symbol = report_symbol.strip()
+    if not is_valid_symbol(report_symbol):
+        return GateNormalized(False, "gate_json_malformed")
+    report_symbol = report_symbol.upper()
     if symbol is not None and report_symbol != symbol.strip().upper():
         return GateNormalized(False, "gate_symbol_mismatch", symbol=report_symbol)
 
