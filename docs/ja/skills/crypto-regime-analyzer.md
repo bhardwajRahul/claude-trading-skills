@@ -3,7 +3,7 @@ layout: default
 title: "Crypto Regime Analyzer"
 grand_parent: 日本語
 parent: スキルガイド
-nav_order: 14
+nav_order: 15
 lang_peer: /en/skills/crypto-regime-analyzer/
 permalink: /ja/skills/crypto-regime-analyzer/
 generated: true
