@@ -89,29 +89,44 @@ def _price(label: str) -> gl.NormalizedInput:
 
 
 def _oracle_status(c: str, n: str, p: str) -> str:
-    """Independent re-statement of plan §3.3's precedence rules 1-8,
-    deliberately NOT derived from gate_logic's own code."""
+    """Independent re-statement of plan §3.3's v4 SEQUENTIAL precedence
+    (PR #249 P1-3), deliberately NOT derived from gate_logic's own code.
+    Each step fully settles before the next is even looked at -- news
+    settles before price-action is inspected at all, so a later step's
+    problem can never soften an earlier step's definitive verdict."""
     if c in ("INVALID", "INSUFF"):
         return "INSUFFICIENT_EVIDENCE"
     if c == "NOT_CONF":
         return "REJECTED"
-    # c in (CONF_L, CONF_S) from here.
-    if n == "INVALID" or p == "INVALID":
+    # c in (CONF_L, CONF_S) from here. Step 2: news settles first, on its
+    # own, without even looking at p yet.
+    if n == "INVALID":
         return "INSUFFICIENT_EVIDENCE"
-    if n == "NOT_CONF" or p == "NOT_CONF":
+    if n == "NOT_CONF":
         return "REJECTED"
-    if n == "INSUFF" or p == "INSUFF":
+    if n == "INSUFF":
         return "INSUFFICIENT_EVIDENCE"
-    # n, p in (CONF, PENDING) from here -- 4 combinations, all reachable.
-    if n == "PENDING" and p == "CONF":
-        return "CROWDED"  # out-of-order cap
-    if n == "PENDING" and p == "PENDING":
-        return "CROWDED"
-    if n == "CONF" and p == "PENDING":
+    if n == "PENDING":
+        # Step 3, out-of-order: p is still fully evaluated on its own.
+        if p == "INVALID":
+            return "INSUFFICIENT_EVIDENCE"
+        if p == "NOT_CONF":
+            return "REJECTED"
+        if p == "INSUFF":
+            return "INSUFFICIENT_EVIDENCE"
+        if p == "CONF":
+            return "CROWDED"  # out-of-order cap + warning
+        return "CROWDED"  # p == PENDING too: crowding only
+    # n == CONF. Step 3: price-action, evaluated on its own.
+    if p == "INVALID":
+        return "INSUFFICIENT_EVIDENCE"
+    if p == "NOT_CONF":
+        return "REJECTED"
+    if p == "INSUFF":
+        return "INSUFFICIENT_EVIDENCE"
+    if p == "PENDING":
         return "WATCHING_PRICE"
-    if n == "CONF" and p == "CONF":
-        return "READY_FOR_PLAN"
-    raise AssertionError((c, n, p))  # pragma: no cover
+    return "READY_FOR_PLAN"  # p == CONF: all three confirmed
 
 
 @pytest.mark.parametrize("c_label", C_LABELS)
@@ -214,27 +229,67 @@ def test_pin_crowding_insufficient_beats_downstream_not_confirmed() -> None:
     assert status == "INSUFFICIENT_EVIDENCE"
 
 
-def test_pin_rule2_before_rule3() -> None:
+def test_pin_news_invalid_settles_before_price_is_ever_consulted() -> None:
     """C=CONFIRMED + N=INVALID + P=NOT_CONFIRMED -> INSUFFICIENT_EVIDENCE:
-    rule 2 (any INVALID) is checked before rule 3 (any NOT_CONFIRMED)."""
+    news (step 2) settles as INVALID and returns immediately -- price
+    (step 3) is never even inspected, so its NOT_CONFIRMED plays no part
+    (v4 sequential model, PR #249 P1-3)."""
     crowding = _crowding("CONF_S")
     news = gl.NormalizedInput(kind=gl.STEP_NEWS, state=gl.STATE_INVALID, reason="news_parse_error")
     price = gl.NormalizedInput(kind=gl.STEP_PRICE, state=gl.STATE_NOT_CONFIRMED, reason="x")
     status, missing, _warnings = gl.decide_setup_status(crowding, news, price)
     assert status == "INSUFFICIENT_EVIDENCE"
-    # Only the deciding (INVALID) step is named at this precedence tier.
+    # Only the deciding (INVALID) step is named -- price was never reached.
     assert missing == [{"step": "news_failure", "state": "INVALID", "reason": "news_parse_error"}]
 
 
-def test_pin_rule3_before_rule4() -> None:
-    """C=CONFIRMED + N=NOT_CONFIRMED + P=INSUFFICIENT -> REJECTED: rule 3
-    (any NOT_CONFIRMED) is checked before rule 4 (any INSUFFICIENT)."""
+def test_pin_news_not_confirmed_settles_before_price_is_ever_consulted() -> None:
+    """C=CONFIRMED + N=NOT_CONFIRMED + P=INSUFFICIENT -> REJECTED: news
+    settles as NOT_CONFIRMED and returns immediately -- price's own
+    INSUFFICIENT state is never reached (v4 sequential model)."""
     crowding = _crowding("CONF_L")
     news = gl.NormalizedInput(kind=gl.STEP_NEWS, state=gl.STATE_NOT_CONFIRMED, reason="x")
     price = gl.NormalizedInput(kind=gl.STEP_PRICE, state=gl.STATE_INSUFFICIENT, reason="y")
     status, missing, _warnings = gl.decide_setup_status(crowding, news, price)
     assert status == "REJECTED"
     assert missing == [{"step": "news_failure", "state": "NOT_CONFIRMED", "reason": "x"}]
+
+
+def test_pin_news_not_confirmed_beats_price_invalid_p1_3_repro() -> None:
+    """THE USER'S PR #249 P1-3 REPRO: C=CONFIRMED + N=NOT_CONFIRMED +
+    P=INVALID(unreadable/binary) -> REJECTED, not INSUFFICIENT_EVIDENCE.
+    Before the v4 fix, the v3 aggregate rule ("any provided INVALID
+    across N/P" checked before "any NOT_CONFIRMED across N/P") let a
+    LATER step's file corruption soften an EARLIER step's definitive
+    rejection. News settling first structurally prevents that: price is
+    never even inspected once news has already rejected."""
+    crowding = _crowding("CONF_S")
+    news = gl.NormalizedInput(kind=gl.STEP_NEWS, state=gl.STATE_NOT_CONFIRMED, reason="no_reversal")
+    price = gl.NormalizedInput(
+        kind=gl.STEP_PRICE, state=gl.STATE_INVALID, reason="price_action_unreadable"
+    )
+    status, missing, _warnings = gl.decide_setup_status(crowding, news, price)
+    assert status == "REJECTED"
+    assert missing == [{"step": "news_failure", "state": "NOT_CONFIRMED", "reason": "no_reversal"}]
+
+
+def test_pin_news_insufficient_beats_price_not_confirmed_symmetric_case() -> None:
+    """Symmetric to the P1-3 repro: C=CONFIRMED + N=INSUFFICIENT +
+    P=NOT_CONFIRMED -> INSUFFICIENT_EVIDENCE, not REJECTED. News settles
+    first as INSUFFICIENT (a run that tried and could not judge never
+    advances); price's own NOT_CONFIRMED is never reached to reject."""
+    crowding = _crowding("CONF_L")
+    news = gl.NormalizedInput(
+        kind=gl.STEP_NEWS, state=gl.STATE_INSUFFICIENT, reason="no_usable_events"
+    )
+    price = gl.NormalizedInput(
+        kind=gl.STEP_PRICE, state=gl.STATE_NOT_CONFIRMED, reason="no_reversal"
+    )
+    status, missing, _warnings = gl.decide_setup_status(crowding, news, price)
+    assert status == "INSUFFICIENT_EVIDENCE"
+    assert missing == [
+        {"step": "news_failure", "state": "INSUFFICIENT", "reason": "no_usable_events"}
+    ]
 
 
 def test_pin_out_of_order_price_without_news_caps_at_crowded() -> None:
@@ -338,6 +393,17 @@ def test_normalize_crowding_symbol_in_skipped_is_insufficient() -> None:
     assert result.reason == "detector_missing_symbol"
 
 
+def test_normalize_crowding_skipped_entry_with_unhashable_symbol_never_crashes() -> None:
+    """PR #249 P1-1: an untrusted skip-entry whose `symbol` is a JSON list
+    must not crash building the skipped-symbols set (adding an unhashable
+    value to a set raises TypeError). The bad entry is simply excluded
+    from the set; the market row (present and usable) still normalizes."""
+    data = detector_fixture(classification="CROWDED_SHORT")
+    data["skipped"] = [{"symbol": ["not", "hashable"], "reason": "malformed"}]
+    result = gl.normalize_crowding(data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=10)
+    assert result.state == gl.STATE_CONFIRMED
+
+
 def test_normalize_crowding_duplicate_symbol_rows_first_match_wins() -> None:
     """Duplicate `symbol` rows in markets[] -> first match wins (v2 P2-7)."""
     data = detector_fixture(classification="CROWDED_SHORT")
@@ -393,6 +459,20 @@ def test_normalize_crowding_data_date_divergence_warning() -> None:
 
 def test_normalize_crowding_unknown_classification() -> None:
     data = detector_fixture(classification="WEIRD")
+    result = gl.normalize_crowding(data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=10)
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "detector_unknown_classification"
+
+
+@pytest.mark.parametrize("bad_classification", [["CROWDED_LONG"], {"a": 1}, 123, True])
+def test_normalize_crowding_unhashable_or_wrong_type_classification_never_crashes(
+    bad_classification,
+) -> None:
+    """PR #249 P1-1: `classification not in FADE_DIRECTION` requires a
+    hashable operand -- an unhashable classification (list/dict) used to
+    raise TypeError instead of failing closed. Every non-string type must
+    degrade to detector_unknown_classification, never crash."""
+    data = detector_fixture(classification=bad_classification)
     result = gl.normalize_crowding(data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=10)
     assert result.state == gl.STATE_INVALID
     assert result.reason == "detector_unknown_classification"
@@ -571,6 +651,73 @@ def test_normalize_news_unknown_verdict() -> None:
     )
     assert result.state == gl.STATE_INVALID
     assert result.reason == "news_unknown_verdict"
+
+
+def test_normalize_news_unhashable_verdict_never_crashes() -> None:
+    """THE USER'S PR #249 P1-1 REPRO: verdict: [] used to raise TypeError
+    (`verdict not in valid_verdicts` requires a hashable operand) instead
+    of failing closed with exit 0 + a report."""
+    data = news_fixture(verdict=[])
+    result = gl.normalize_news(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "news_malformed"
+
+
+@pytest.mark.parametrize("bad_verdict", [{"a": 1}, 123, True, None])
+def test_normalize_news_wrong_type_verdict_is_malformed(bad_verdict) -> None:
+    data = news_fixture(verdict=bad_verdict)
+    result = gl.normalize_news(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "news_malformed"
+
+
+def test_normalize_news_unhashable_confidence_never_crashes() -> None:
+    """THE USER'S PR #249 P1-1 REPRO: confidence: {} used to raise
+    TypeError deep inside gate_confidence's CONFIDENCE_RANK.get(...)."""
+    data = news_fixture(confidence={})
+    result = gl.normalize_news(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "news_malformed"
+
+
+def test_normalize_news_unknown_confidence_string_fails_closed() -> None:
+    """PR #249 P1-2 REPRO: confidence: "BANANA" used to pass straight
+    through to gate_confidence unvalidated instead of failing closed."""
+    data = news_fixture(verdict="CONFIRMED", confidence="BANANA")
+    result = gl.normalize_news(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "news_unknown_confidence"
+
+
+def test_normalize_news_low_confidence_is_accepted_reserved_token() -> None:
+    """LOW is a reserved token both upstreams document but never emit --
+    accepted here, not rejected as unknown (PR #249 P1-2)."""
+    data = news_fixture(verdict="CONFIRMED", confidence="LOW")
+    result = gl.normalize_news(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_CONFIRMED
+    assert result.confidence == "LOW"
+
+
+def test_normalize_news_non_string_direction_is_malformed_not_mismatch() -> None:
+    """A non-null, non-string direction (e.g. a stray integer) is
+    malformed input, not a legitimate mismatch to compare against the
+    detector's classification (PR #249 P1-1)."""
+    data = news_fixture(direction=123)
+    result = gl.normalize_news(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "news_malformed"
 
 
 def test_normalize_news_stale() -> None:
@@ -782,6 +929,52 @@ def test_normalize_price_action_unknown_verdict() -> None:
     assert result.reason == "price_action_unknown_verdict"
 
 
+def test_normalize_price_action_unhashable_verdict_never_crashes() -> None:
+    """Mirror of the user's PR #249 P1-1 repro for price-action."""
+    data = price_fixture(verdict=[])
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "price_action_malformed"
+
+
+def test_normalize_price_action_unhashable_confidence_never_crashes() -> None:
+    data = price_fixture(confidence={})
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "price_action_malformed"
+
+
+def test_normalize_price_action_unknown_confidence_string_fails_closed() -> None:
+    data = price_fixture(verdict="CONFIRMED", confidence="BANANA")
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "price_action_unknown_confidence"
+
+
+def test_normalize_price_action_low_confidence_is_accepted_reserved_token() -> None:
+    data = price_fixture(verdict="CONFIRMED", confidence="LOW")
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_CONFIRMED
+    assert result.confidence == "LOW"
+
+
+def test_normalize_price_action_non_string_direction_is_malformed_not_mismatch() -> None:
+    data = price_fixture(direction=123)
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "price_action_malformed"
+
+
 def test_normalize_price_action_near_stale_warning() -> None:
     data = price_fixture(as_of="2026-07-09")  # AS_OF 2026-07-15, max 7 -> age 6
     result = gl.normalize_price_action(
@@ -816,6 +1009,12 @@ def _confirmed_price(
         ("HIGH", "MEDIUM", "MEDIUM"),
         ("MEDIUM", "HIGH", "MEDIUM"),
         ("MEDIUM", "MEDIUM", "MEDIUM"),
+        # LOW is a reserved-but-accepted token (PR #249 P1-2): it ranks
+        # weakest of all three, below MEDIUM.
+        ("HIGH", "LOW", "LOW"),
+        ("LOW", "HIGH", "LOW"),
+        ("MEDIUM", "LOW", "LOW"),
+        ("LOW", "LOW", "LOW"),
     ],
 )
 def test_gate_confidence_is_weakest_link(news_conf, price_conf, expected) -> None:

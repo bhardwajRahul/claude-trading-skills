@@ -295,6 +295,124 @@ def test_cli_malformed_news_json_top_level_list_never_crashes(
     assert result["inputs"]["news_failure"]["state"] == "INVALID"
 
 
+def test_cli_news_verdict_list_never_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE USER'S PR #249 P1-1 REPRO, end-to-end through the CLI:
+    `verdict: []` in a provided news report used to raise an uncaught
+    TypeError (unhashable set-membership check) instead of the exit-0 +
+    report contract every other degraded input honors."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_data = _news_fixture(verdict="CONFIRMED")
+    news_data["verdict"] = []
+    news_path = _write(tmp_path, "news.json", news_data)
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["inputs"]["news_failure"]["state"] == "INVALID"
+    assert result["missing_confirmations"][0]["reason"] == "news_malformed"
+
+
+def test_cli_news_confidence_dict_never_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE USER'S PR #249 P1-1 REPRO, end-to-end: `confidence: {}` used to
+    raise an uncaught TypeError deep inside gate_confidence computation."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_data = _news_fixture(verdict="CONFIRMED")
+    news_data["confidence"] = {}
+    news_path = _write(tmp_path, "news.json", news_data)
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["inputs"]["news_failure"]["state"] == "INVALID"
+    assert result["missing_confirmations"][0]["reason"] == "news_malformed"
+
+
+def test_cli_detector_classification_int_never_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror of the user's PR #249 P1-1 repro for the detector's own
+    `classification` field: a wrong-typed value used to raise TypeError
+    in the `classification not in FADE_DIRECTION` membership check."""
+    detector_data = _detector_fixture()
+    detector_data["markets"][0]["classification"] = 123
+    detector_path = _write(tmp_path, "detector.json", detector_data)
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        ["--symbol", SYMBOL, "--detector-json", detector_path, "--as-of", AS_OF],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["inputs"]["crowding"]["state"] == "INVALID"
+    assert result["missing_confirmations"][0]["reason"] == "detector_unknown_classification"
+
+
+def test_cli_news_confidence_banana_fails_closed_not_passthrough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #249 P1-2 REPRO, end-to-end: an unknown confidence string used
+    to reach `gate_confidence` in the output verbatim instead of being
+    rejected as INVALID with a named reason."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    price_path = _write(tmp_path, "price.json", _price_fixture(verdict="CONFIRMED"))
+    news_data = _news_fixture(verdict="CONFIRMED")
+    news_data["confidence"] = "BANANA"
+    news_path = _write(tmp_path, "news.json", news_data)
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--price-action-json",
+            price_path,
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["gate_confidence"] is None
+    assert result["inputs"]["news_failure"]["state"] == "INVALID"
+    assert result["missing_confirmations"][0]["reason"] == "news_unknown_confidence"
+
+
 def test_cli_format_json_only_skips_markdown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

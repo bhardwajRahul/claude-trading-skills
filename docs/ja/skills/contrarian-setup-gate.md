@@ -103,7 +103,7 @@ python3 skills/contrarian-setup-gate/scripts/run_contrarian_setup_gate.py \
 
 ### Phase 3: READY_FOR_PLANでのみ行動する
 
-`READY_FOR_PLAN`に到達すると、3つの出力フィールドが埋まります。`direction`は群集ポジションに逆張りする方向をSHORTまたはLONGで示し、`entry_trigger`は確認された週足シグナルを事実として要約し、`invalidation_level`は価格アクションレポートのストップ参照値を引き継ぎます。`gate_confidence`にはニュースと価格アクションそれぞれの信頼度のうち弱い方をHIGHまたはMEDIUMで設定します。ポジションサイジングはパイプラインの次段階にあたりますが、本スキルのリリース時点ではまだ実装されていません。このゲートは発注や発注推奨を一切行いません。
+`READY_FOR_PLAN`に到達すると、3つの出力フィールドが埋まります。`direction`は群集ポジションに逆張りする方向をSHORTまたはLONGで示し、`entry_trigger`は確認された週足シグナルを事実として要約し、`invalidation_level`は価格アクションレポートのストップ参照値を引き継ぎます。`gate_confidence`にはニュースと価格アクションそれぞれの信頼度のうち弱い方をHIGH・MEDIUM・LOWのいずれかで設定します。LOWは両上流スキルが予約済みトークンとして文書化しているものの実際には出力しない値です。このゲートは値を受理し、最弱のランクとして扱います。ポジションサイジングはパイプラインの次段階にあたりますが、本スキルのリリース時点ではまだ実装されていません。このゲートは発注や発注推奨を一切行いません。
 
 ---
 

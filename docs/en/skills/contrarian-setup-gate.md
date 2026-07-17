@@ -103,7 +103,7 @@ Exit behavior is intentionally asymmetric: a missing or malformed `--as-of` (or 
 
 ### Step 3: Act on READY_FOR_PLAN Only
 
-At `READY_FOR_PLAN`, `direction` (SHORT/LONG, the fade side of the crowd), `entry_trigger` (a factual echo of the confirming weekly signal), and `invalidation_level` (the stop reference from the price-action report) are populated. `gate_confidence` is the weaker of the news and price-action confidences (HIGH/MEDIUM). Position sizing is the next pipeline stage (not yet built as of this skill's release -- see the roadmap in the repository's workflow docs); this gate never places or recommends an order.
+At `READY_FOR_PLAN`, `direction` (SHORT/LONG, the fade side of the crowd), `entry_trigger` (a factual echo of the confirming weekly signal), and `invalidation_level` (the stop reference from the price-action report) are populated. `gate_confidence` is the weaker of the news and price-action confidences (HIGH/MEDIUM/LOW -- `LOW` is a token both upstream skills document as reserved but never actually emit; the gate accepts it and ranks it weakest rather than rejecting it as unknown). Position sizing is the next pipeline stage (not yet built as of this skill's release -- see the roadmap in the repository's workflow docs); this gate never places or recommends an order.
 
 ---
 

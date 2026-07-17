@@ -59,18 +59,18 @@ Exit behavior is intentionally asymmetric: a missing or malformed `--as-of` (or 
 
 ### Step 3: Act on READY_FOR_PLAN Only
 
-At `READY_FOR_PLAN`, `direction` (SHORT/LONG, the fade side of the crowd), `entry_trigger` (a factual echo of the confirming weekly signal), and `invalidation_level` (the stop reference from the price-action report) are populated. `gate_confidence` is the weaker of the news and price-action confidences (HIGH/MEDIUM). Position sizing is the next pipeline stage (not yet built as of this skill's release -- see the roadmap in the repository's workflow docs); this gate never places or recommends an order.
+At `READY_FOR_PLAN`, `direction` (SHORT/LONG, the fade side of the crowd), `entry_trigger` (a factual echo of the confirming weekly signal), and `invalidation_level` (the stop reference from the price-action report) are populated. `gate_confidence` is the weaker of the news and price-action confidences (HIGH/MEDIUM/LOW -- `LOW` is a token both upstream skills document as reserved but never actually emit; the gate accepts it and ranks it weakest rather than rejecting it as unknown). Position sizing is the next pipeline stage (not yet built as of this skill's release -- see the roadmap in the repository's workflow docs); this gate never places or recommends an order.
 
 ## Precedence (Summary)
 
+Each step is evaluated in strict pipeline order -- crowding, then news, then price-action -- and each step fully settles before the next step's file is even consulted. An earlier step's definitive verdict is never softened by a later step's problem.
+
 1. Crowding is evaluated first and exclusively: INVALID/INSUFFICIENT crowding is always `INSUFFICIENT_EVIDENCE`; a NOT_CONFIRMED (NEUTRAL) classification is always `REJECTED`, regardless of any downstream file's state or corruption.
-2. With crowding CONFIRMED, any provided news/price-action input that is INVALID (unreadable, malformed, stale, symbol mismatch, direction mismatch, unsupported schema) forces `INSUFFICIENT_EVIDENCE`.
-3. Any NOT_CONFIRMED news/price-action verdict forces `REJECTED`.
-4. Any INSUFFICIENT news/price-action verdict forces `INSUFFICIENT_EVIDENCE`.
-5. Running price-action before news (out-of-order pipeline use) caps the status at `CROWDED` with a warning -- a NOT_CONFIRMED price-action verdict still REJECTs even out of order.
-6. Crowding confirmed, both downstream steps pending -> `CROWDED`.
-7. Crowding + news confirmed, price-action pending -> `WATCHING_PRICE`.
-8. All three confirmed -> `READY_FOR_PLAN`.
+2. With crowding CONFIRMED, news is evaluated next, on its own: INVALID (unreadable, malformed, stale, symbol mismatch, direction mismatch, unsupported schema) forces `INSUFFICIENT_EVIDENCE`; NOT_CONFIRMED forces `REJECTED`; INSUFFICIENT forces `INSUFFICIENT_EVIDENCE` -- in every one of these cases, price-action is never even inspected for the decision.
+3. Once news is CONFIRMED (or PENDING, for out-of-order use), price-action is evaluated last, with the same four-way settlement. Running price-action before news (out-of-order pipeline use) caps the status at `CROWDED` with a warning -- a NOT_CONFIRMED price-action verdict still REJECTs even out of order, since price-action is still fully evaluated in that branch.
+4. Crowding confirmed, both downstream steps pending -> `CROWDED`.
+5. Crowding + news confirmed, price-action pending -> `WATCHING_PRICE`.
+6. All three confirmed -> `READY_FOR_PLAN`.
 
 See `references/gate-decision-table.md` for the full decision table (every reachable {crowding} x {news} x {price-action} state combination), the reason-token glossary, and worked examples.
 
@@ -82,7 +82,7 @@ The script writes `contrarian_setup_gate_<SYMBOL>_<as-of>.json` and `.md` to `--
 symbol: B6
 setup_status: READY_FOR_PLAN | WATCHING_PRICE | CROWDED | REJECTED | INSUFFICIENT_EVIDENCE
 direction: SHORT | LONG | null
-gate_confidence: HIGH | MEDIUM | null
+gate_confidence: HIGH | MEDIUM | LOW | null
 entry_trigger: string | null
 invalidation_level: number | null
 missing_confirmations: [{step, state, reason}, ...]

@@ -2,38 +2,46 @@
 
 ## Purpose
 
-This gate combines three normalized states -- crowding (C), news failure (N), and price action (P) -- into one `setup_status` via an explicit precedence rule set. Each of N and P is one of five states: `CONFIRMED`, `NOT_CONFIRMED`, `INSUFFICIENT`, `PENDING` (the report file was not provided), or `INVALID` (a report was provided but is unusable). C shares the same five states, except it is never `PENDING` -- the detector report is always required.
+This gate combines three normalized states -- crowding (C), news failure (N), and price action (P) -- into one `setup_status` via SEQUENTIAL pipeline-order evaluation. Each of N and P is one of five states: `CONFIRMED`, `NOT_CONFIRMED`, `INSUFFICIENT`, `PENDING` (the report file was not provided), or `INVALID` (a report was provided but is unusable). C shares the same five states, except it is never `PENDING` -- the detector report is always required.
 
-The rules are evaluated **in order**; the first rule that matches decides the status. This document is the authoritative spec the test suite (`scripts/tests/test_gate_logic.py`) checks against.
+Each step is evaluated **in pipeline order** -- crowding, then news, then price-action -- and each step FULLY SETTLES (reaches a determination) before the next step's state is even inspected. This document is the authoritative spec the test suite (`scripts/tests/test_gate_logic.py`) checks against.
+
+## Why sequential, not "any-X across both downstream steps" (v4, PR #249 P1-3)
+
+An earlier design (v3) evaluated the two downstream steps AS A GROUP: "any provided N or P that is INVALID" was checked before "any N or P that is NOT_CONFIRMED," scanning both steps for each condition before moving to the next condition. That aggregation let a LATER step's problem soften an EARLIER step's definitive verdict -- e.g. news already NOT_CONFIRMED (a hard rejection) got downgraded to INSUFFICIENT_EVIDENCE merely because price-action's file happened to be corrupted, even though price-action was never going to be consulted once news had already rejected the setup. This is the same softening-principle violation already fixed twice elsewhere in this gate (the loader path in v1, the consistency path in v2/v3) -- now caught a third time, in cross-step aggregation, by an independent user review. The sequential model makes the principle structural: once a step settles, later steps simply aren't looked at for that decision.
 
 ## Precedence Rules
 
-1. **Crowding first, exclusively.**
+1. **Crowding, evaluated first and exclusively.**
    - C is `INVALID` or `INSUFFICIENT` -> `INSUFFICIENT_EVIDENCE`.
-   - C is `NOT_CONFIRMED` (classification `NEUTRAL`) -> `REJECTED`, **regardless of N or P's state**. A corrupted, stale, or mismatched downstream file must never soften crowding's own definitive "not crowded" conclusion. N/P are still echoed in the `inputs` audit block, but never change this status.
-2. (C is `CONFIRMED` from here.) Any provided N or P that is `INVALID` -> `INSUFFICIENT_EVIDENCE`, naming every invalid step.
-3. Any N or P that is `NOT_CONFIRMED` -> `REJECTED`, naming every rejecting step.
-4. Any provided N or P that is `INSUFFICIENT` -> `INSUFFICIENT_EVIDENCE`.
-5. **Out-of-order use.** If P is `CONFIRMED` while N is still `PENDING`, the pipeline order (crowding -> news -> price) was skipped. The gate accepts this but caps the status at `CROWDED`, with warning `out_of_order_price_action` and `news_failure` listed as pending. (A `NOT_CONFIRMED` P still REJECTs via rule 3 above -- that rule runs before this one is ever reached.)
-6. C `CONFIRMED`, N and P both `PENDING` -> `CROWDED`.
-7. C + N `CONFIRMED`, P `PENDING` -> `WATCHING_PRICE`.
-8. C + N + P all `CONFIRMED` -> `READY_FOR_PLAN` (direction, `gate_confidence`, `entry_trigger`, and `invalidation_level` are populated).
+   - C is `NOT_CONFIRMED` (classification `NEUTRAL`) -> `REJECTED`, **regardless of N or P's state** -- N/P are never even inspected for this decision. N/P are still echoed in the `inputs` audit block, but never change this status.
+   - C is `CONFIRMED` -> continue to step 2.
+2. **News, evaluated next -- if provided (state != `PENDING`).** The same four-way settlement: `INVALID` -> `INSUFFICIENT_EVIDENCE`; `NOT_CONFIRMED` -> `REJECTED`; `INSUFFICIENT` -> `INSUFFICIENT_EVIDENCE`; `CONFIRMED` -> continue to step 3. **Price-action is not inspected at all until news has settled as `CONFIRMED`** (or is `PENDING`, handled by step 3's out-of-order case below).
+3. **Price-action, evaluated last.** If news was `CONFIRMED`: the same four-way settlement on price-action, with `PENDING` -> `WATCHING_PRICE` and `CONFIRMED` -> `READY_FOR_PLAN`. **Out-of-order use** (price-action provided while news is still `PENDING`): price-action is still fully evaluated here with the same four-way settlement (`INVALID`/`NOT_CONFIRMED`/`INSUFFICIENT` resolve normally), but a `CONFIRMED` price-action caps the status at `CROWDED` with warning `out_of_order_price_action` instead of advancing to `READY_FOR_PLAN`, since news was never actually confirmed. If both news and price-action are `PENDING` -> `CROWDED` (crowding only).
+
+Pipeline order therefore **refines**, rather than simply restates, "any explicit NOT_CONFIRMED rejects": a later step's `NOT_CONFIRMED` can be masked by an EARLIER step's own settlement first (see the symmetric pin below) -- each later step's validity is premised on the earlier ones having already passed, mirroring how technical-analyst itself refuses to run its own confirmation pass against a `NEUTRAL` (unconfirmed) detector.
 
 ## Full State Table
 
-C has 5 reachable labels: `CROWDED_LONG` and `CROWDED_SHORT` (both `CONFIRMED`, differing only in fade direction), `NOT_CONFIRMED`, `INSUFFICIENT`, `INVALID`. N and P each have 5 reachable labels: `CONFIRMED`, `NOT_CONFIRMED`, `INSUFFICIENT`, `PENDING`, `INVALID`. All 125 combinations are exhaustively unit-tested; the table below collapses them by rule.
+C has 5 reachable labels: `CROWDED_LONG` and `CROWDED_SHORT` (both `CONFIRMED`, differing only in fade direction), `NOT_CONFIRMED`, `INSUFFICIENT`, `INVALID`. N and P each have 5 reachable labels: `CONFIRMED`, `NOT_CONFIRMED`, `INSUFFICIENT`, `PENDING`, `INVALID`. All 125 combinations are exhaustively unit-tested; the table below collapses them by which step settles the decision.
 
-| C state | N / P states | Result |
-|---|---|---|
-| `INVALID` or `INSUFFICIENT` | any | `INSUFFICIENT_EVIDENCE` |
-| `NOT_CONFIRMED` | any | `REJECTED` |
-| `CONFIRMED` | any N or P `INVALID` | `INSUFFICIENT_EVIDENCE` |
-| `CONFIRMED` | any N or P `NOT_CONFIRMED` (and none `INVALID`) | `REJECTED` |
-| `CONFIRMED` | any N or P `INSUFFICIENT` (and none `INVALID`/`NOT_CONFIRMED`) | `INSUFFICIENT_EVIDENCE` |
-| `CONFIRMED` | N `PENDING`, P `CONFIRMED` | `CROWDED` (+ `out_of_order_price_action` warning) |
-| `CONFIRMED` | N `PENDING`, P `PENDING` | `CROWDED` |
-| `CONFIRMED` | N `CONFIRMED`, P `PENDING` | `WATCHING_PRICE` |
-| `CONFIRMED` | N `CONFIRMED`, P `CONFIRMED` | `READY_FOR_PLAN` |
+| C state | N state | P state | Result |
+|---|---|---|---|
+| `INVALID` or `INSUFFICIENT` | any | any | `INSUFFICIENT_EVIDENCE` (step 1 only) |
+| `NOT_CONFIRMED` | any | any | `REJECTED` (step 1 only) |
+| `CONFIRMED` | `INVALID` | any | `INSUFFICIENT_EVIDENCE` (step 2; P never inspected) |
+| `CONFIRMED` | `NOT_CONFIRMED` | any | `REJECTED` (step 2; P never inspected) |
+| `CONFIRMED` | `INSUFFICIENT` | any | `INSUFFICIENT_EVIDENCE` (step 2; P never inspected) |
+| `CONFIRMED` | `PENDING` | `INVALID` | `INSUFFICIENT_EVIDENCE` (step 3, out-of-order) |
+| `CONFIRMED` | `PENDING` | `NOT_CONFIRMED` | `REJECTED` (step 3, out-of-order) |
+| `CONFIRMED` | `PENDING` | `INSUFFICIENT` | `INSUFFICIENT_EVIDENCE` (step 3, out-of-order) |
+| `CONFIRMED` | `PENDING` | `CONFIRMED` | `CROWDED` (+ `out_of_order_price_action` warning) |
+| `CONFIRMED` | `PENDING` | `PENDING` | `CROWDED` |
+| `CONFIRMED` | `CONFIRMED` | `INVALID` | `INSUFFICIENT_EVIDENCE` (step 3) |
+| `CONFIRMED` | `CONFIRMED` | `NOT_CONFIRMED` | `REJECTED` (step 3) |
+| `CONFIRMED` | `CONFIRMED` | `INSUFFICIENT` | `INSUFFICIENT_EVIDENCE` (step 3) |
+| `CONFIRMED` | `CONFIRMED` | `PENDING` | `WATCHING_PRICE` |
+| `CONFIRMED` | `CONFIRMED` | `CONFIRMED` | `READY_FOR_PLAN` |
 
 ## Named Precedence Pins
 
@@ -42,12 +50,14 @@ These specific combinations are individually pinned in the test suite because th
 - **C=`NOT_CONFIRMED` + N=`INVALID` (unreadable)** -> `REJECTED`. Crowding's own conclusion is never softened by a corrupted downstream file.
 - **C=`NOT_CONFIRMED` + N=`INVALID` (symbol_mismatch)** -> `REJECTED`. A consistency-check failure is a PER-INPUT `INVALID`, never a global override -- it cannot soften crowding's own conclusion either.
 - **C=`NOT_CONFIRMED` + P=`NOT_CONFIRMED`** -> `REJECTED`, with crowding named as the rejector (not price action).
-- **C=`INVALID` + N=`NOT_CONFIRMED`** -> `INSUFFICIENT_EVIDENCE` (rule 1 runs before N is even inspected).
+- **C=`INVALID` + N=`NOT_CONFIRMED`** -> `INSUFFICIENT_EVIDENCE` (step 1 settles before N is even inspected).
 - **C=`INSUFFICIENT` + N=`NOT_CONFIRMED`** -> `INSUFFICIENT_EVIDENCE` (same).
-- **C=`CONFIRMED` + N=`INVALID` + P=`NOT_CONFIRMED`** -> `INSUFFICIENT_EVIDENCE` (rule 2 runs before rule 3).
-- **C=`CONFIRMED` + N=`NOT_CONFIRMED` + P=`INSUFFICIENT`** -> `REJECTED` (rule 3 runs before rule 4).
+- **C=`CONFIRMED` + N=`INVALID` + P=`NOT_CONFIRMED`** -> `INSUFFICIENT_EVIDENCE` (news settles at step 2; price is never reached).
+- **C=`CONFIRMED` + N=`NOT_CONFIRMED` + P=`INSUFFICIENT`** -> `REJECTED` (news settles at step 2; price is never reached).
+- **C=`CONFIRMED` + N=`NOT_CONFIRMED` + P=`INVALID`(unreadable/binary)** -> `REJECTED`, **not** `INSUFFICIENT_EVIDENCE` (v4, PR #249 P1-3 -- this is the exact combination the v3 aggregate rule got wrong: news's definitive rejection at step 2 means price-action's corruption at step 3 is never even inspected).
+- **Symmetric case: C=`CONFIRMED` + N=`INSUFFICIENT` + P=`NOT_CONFIRMED`** -> `INSUFFICIENT_EVIDENCE`, **not** `REJECTED` (news settles first as INSUFFICIENT; price's NOT_CONFIRMED is never reached).
 - **Out-of-order P without N, P `CONFIRMED`** -> `CROWDED` + warning.
-- **Out-of-order P without N, P `NOT_CONFIRMED`** -> `REJECTED` (rule 3 still applies -- out-of-order capping only ever applies to the CONFIRMED/PENDING combinations left after rules 1-4 have run).
+- **Out-of-order P without N, P `NOT_CONFIRMED`** -> `REJECTED` (price-action is still fully evaluated in the out-of-order branch -- out-of-order capping only applies to a `CONFIRMED` price-action).
 
 ## Cross-Input Consistency (PER-INPUT INVALID)
 
@@ -74,7 +84,7 @@ A consistency failure marks the **exhibiting input** `INVALID` with a named reas
 | `detector_invalid_data_date` | INVALID | `data_date` not a string, or unparsable |
 | `detector_future_data_date` | INVALID | `data_date` is after `--as-of` |
 | `detector_json_stale` | INVALID | `data_date` age exceeds `--max-detector-age-days` |
-| `detector_unknown_classification` | INVALID | `classification` is not one of `CROWDED_LONG` / `CROWDED_SHORT` / `NEUTRAL` |
+| `detector_unknown_classification` | INVALID | `classification` is not a string, or is a string not one of `CROWDED_LONG` / `CROWDED_SHORT` / `NEUTRAL`. Type-checked before the allowlist membership test -- an unhashable value (a JSON list/dict) would otherwise crash that check instead of failing closed (PR #249 P1-1) |
 | `detector_not_crowded` | NOT_CONFIRMED | `classification` is `NEUTRAL` -- measurably not crowded, an explicit negative |
 
 ### News Failure (news-reaction-failure-analyzer) and Price Action (technical-analyst)
@@ -85,15 +95,16 @@ Both reports share the same reason-token shape, prefixed `news_` / `price_action
 |---|---|---|
 | `_unreadable` | INVALID | File missing, unreadable, or not valid UTF-8 |
 | `_parse_error` | INVALID | File read but is not valid JSON |
-| `_malformed` | INVALID | Top level is not an object, or `symbol`/`direction`/`verdict`/`confidence` is missing |
+| `_malformed` | INVALID | Top level is not an object; `symbol`/`direction`/`verdict`/`confidence` is missing; `direction` is present but neither `null` nor a string; or `verdict`/`confidence` is present but not a string (a JSON list/dict/number/bool/`null` where a string is required) |
 | `_symbol_mismatch` | INVALID | Report's `symbol` does not equal `--symbol` |
 | `_schema_unsupported` | INVALID | `schema_version` major is not `1` |
-| `_direction_mismatch` | INVALID | Report's `direction` is non-null and does not equal the detector's `classification` (checked only when crowding is usable). A `null` `direction` is never a mismatch -- see "Cross-Input Consistency" above |
+| `_direction_mismatch` | INVALID | Report's `direction` is a non-null string that does not equal the detector's `classification` (checked only when crowding is usable). A `null` `direction` is never a mismatch -- see "Cross-Input Consistency" above. A non-string, non-null `direction` is `_malformed`, not a mismatch (PR #249 P1-1) |
 | `_missing_as_of` | INVALID | `run_context.as_of` missing or empty |
 | `_invalid_as_of` | INVALID | `as_of` not a string, or unparsable |
 | `_future_as_of` | INVALID | `as_of` is after `--as-of` |
 | `_json_stale` | INVALID | `as_of` age exceeds `--max-report-age-days` |
-| `_unknown_verdict` | INVALID | `verdict` is not one of the three known values for that report type |
+| `_unknown_verdict` | INVALID | `verdict` is a string but not one of the three known values for that report type. (A non-string `verdict` is `_malformed` instead, checked first -- `verdict not in valid_verdicts` requires a hashable operand, so type-checking first avoids a crash on an unhashable value like a JSON list; PR #249 P1-1, the reported repro) |
+| `_unknown_confidence` | INVALID | `confidence` is a string but not one of `HIGH` / `MEDIUM` / `LOW`. Same type-check-first pattern as `_unknown_verdict` (PR #249 P1-1/P1-2 -- an unvalidated confidence used to reach `gate_confidence` in the output verbatim, e.g. `"BANANA"`). `LOW` is accepted: both upstreams document it as a reserved token they never actually emit, ranked weakest in `gate_confidence`'s weakest-link computation |
 | (upstream `verdict_reason`) | NOT_CONFIRMED / INSUFFICIENT | The upstream report's own `verdict_reason` is carried through unchanged (e.g. `no_reversal_evidence`, `no_usable_events`) |
 
 `price_action_missing_stop_reference` (INVALID, price-action only) fires when `verdict` is `CONFIRMED` but neither `handoff.price_action.stop_reference` nor the top-level `swing_levels.stop_reference` is a usable number -- a `READY_FOR_PLAN` without an invalidation level is not actionable, so this fails closed rather than emitting a null stop.
@@ -109,9 +120,9 @@ Both reports share the same reason-token shape, prefixed `news_` / `price_action
 
 Regenerated live against `cot-contrarian-detector` on 2026-07-12 (`--symbols B6,BT,D6 --as-of 2026-07-12`): B6 (British Pound) came back `CROWDED_SHORT` with `cot_index_3y=7.2`, `run_context.data_date=2026-07-07`. Running the gate with `--as-of 2026-07-15` (detector age 8 days, under the default 10-day max) and a news-reaction-failure-analyzer report whose `verdict` is `NOT_CONFIRMED`:
 
-- Crowding normalizes to `CONFIRMED`, `classification=CROWDED_SHORT`, `direction=LONG` (rule 1 does not fire -- crowding is usable).
-- News normalizes to `NOT_CONFIRMED` (rule 3 fires; rule 2's INVALID check found nothing).
+- Crowding normalizes to `CONFIRMED`, `classification=CROWDED_SHORT`, `direction=LONG` (step 1 does not stop the pipeline -- crowding is usable).
+- News normalizes to `NOT_CONFIRMED` and settles the decision at step 2 -- price-action is never inspected at all for this run (there isn't one provided in this example anyway).
 - `setup_status = REJECTED`, `missing_confirmations = [{"step": "news_failure", "state": "NOT_CONFIRMED", "reason": "<the news report's own verdict_reason>"}]`.
 - `direction` remains `LONG` in the output (crowding was confirmed, even though the overall setup was rejected) -- an audit trail of what crowd was being faded, not an actionable signal.
 
-Running the same detector report with `--as-of` set to a later date pushes the detector's age past `--max-detector-age-days`, which instead produces `INSUFFICIENT_EVIDENCE` with reason `detector_json_stale` -- crowding itself becomes unusable before news is ever inspected (rule 1).
+Running the same detector report with `--as-of` set to a later date pushes the detector's age past `--max-detector-age-days`, which instead produces `INSUFFICIENT_EVIDENCE` with reason `detector_json_stale` -- crowding itself becomes unusable at step 1, before news is ever inspected.

@@ -14,24 +14,51 @@ unreadable / parse_error / malformed / stale) and report generation; it
 passes already-parsed JSON (or a `load_error` tag) into the `normalize_*`
 functions below.
 
-State machine precedence (plan Issue #241 §3.3, v3):
-  1. Crowding is evaluated FIRST and EXCLUSIVELY. INVALID/INSUFFICIENT ->
-     INSUFFICIENT_EVIDENCE; NOT_CONFIRMED (classification NEUTRAL) ->
-     REJECTED, regardless of any downstream N/P state -- a corrupted or
-     mismatched downstream file must never soften crowding's own
-     definitive "not crowded" conclusion.
-  2. (Crowding CONFIRMED from here.) Any provided news/price INVALID ->
-     INSUFFICIENT_EVIDENCE.
-  3. Any news/price NOT_CONFIRMED -> REJECTED.
-  4. Any provided news/price INSUFFICIENT -> INSUFFICIENT_EVIDENCE.
-  5. Out-of-order use (price provided while news is PENDING) caps at
-     CROWDED with a warning -- the pipeline order (crowding -> news ->
-     price) was skipped, but a NOT_CONFIRMED price verdict still REJECTs
-     via rule 3 above (evaluated before this rule is ever reached).
-  6. Crowding CONFIRMED, news+price PENDING -> CROWDED.
-  7. Crowding+news CONFIRMED, price PENDING -> WATCHING_PRICE.
-  8. Crowding+news+price CONFIRMED -> READY_FOR_PLAN (direction,
-     gate_confidence, entry_trigger, invalidation_level populated).
+State machine precedence (plan Issue #241 §3.3, v4 -- SEQUENTIAL
+pipeline-order evaluation, PR #249 user-review P1-3):
+
+  Each step is evaluated in strict pipeline order -- crowding, then news,
+  then price-action -- and each step FULLY SETTLES (reaches a
+  determination) before the next step's file is even consulted for a
+  decision. This is deliberate, not an optimization: an earlier step's
+  definitive verdict must never be softened by a LATER step's problem
+  (corruption, staleness, its own insufficiency, ...). The v3 design
+  aggregated "any provided INVALID" and "any NOT_CONFIRMED" ACROSS both
+  downstream steps before deciding which rule fired first; that let a
+  later step's file corruption soften an earlier step's definitive
+  NOT_CONFIRMED rejection back up to a mere INSUFFICIENT_EVIDENCE -- the
+  same class of softening bug already fixed twice elsewhere in this gate
+  (the loader path and the consistency path), now caught a third time in
+  cross-step aggregation by an independent user review of PR #249.
+
+  1. Crowding: INVALID/INSUFFICIENT -> INSUFFICIENT_EVIDENCE;
+     NOT_CONFIRMED (classification NEUTRAL) -> REJECTED; CONFIRMED ->
+     continue to step 2. (Crowding has no PENDING state -- the detector
+     report is always required.)
+  2. News, if provided (state != PENDING): INVALID -> INSUFFICIENT_EVIDENCE;
+     NOT_CONFIRMED -> REJECTED; INSUFFICIENT -> INSUFFICIENT_EVIDENCE;
+     CONFIRMED -> continue to step 3. If news is PENDING, price-action is
+     still evaluated next under the out-of-order rule (step 3).
+  3. Price-action, if provided: the same four-way settlement as step 2.
+     Out-of-order use (price-action provided while news is still PENDING):
+     price-action is STILL fully evaluated here -- INVALID/NOT_CONFIRMED/
+     INSUFFICIENT still resolve to their normal outcomes -- but a CONFIRMED
+     price-action caps the final status at CROWDED with warning
+     `out_of_order_price_action` rather than advancing to READY_FOR_PLAN,
+     since news was never actually confirmed.
+  4. Progressive from the confirmed prefix: crowding only -> CROWDED;
+     crowding+news -> WATCHING_PRICE; crowding+news+price-action ->
+     READY_FOR_PLAN (direction, gate_confidence, entry_trigger,
+     invalidation_level populated).
+
+  Pipeline order therefore REFINES the issue's original "any explicit
+  NOT_CONFIRMED rejects" framing: a later step's NOT_CONFIRMED can still
+  be masked by an EARLIER step's own settlement (e.g. news=INSUFFICIENT
+  settles before price-action=NOT_CONFIRMED is ever looked at, giving
+  INSUFFICIENT_EVIDENCE, not REJECTED) -- each later step's validity is
+  premised on the earlier ones already having passed, mirroring how
+  technical-analyst itself refuses to run its own confirmation pass on a
+  NEUTRAL (unconfirmed) detector.
 
 Cross-input consistency (symbol_mismatch / direction_mismatch /
 schema_unsupported) is PER-INPUT INVALID (v3): a failure marks the
@@ -67,9 +94,15 @@ FADE_DIRECTION = {"CROWDED_LONG": "SHORT", "CROWDED_SHORT": "LONG"}
 NEWS_VERDICTS = {"CONFIRMED", "NOT_CONFIRMED", "INSUFFICIENT_EVIDENCE"}
 PRICE_VERDICTS = {"CONFIRMED", "NOT_CONFIRMED", "INSUFFICIENT_DATA"}
 
-# HIGH > MEDIUM; LOW is reserved upstream and never emitted, but an unknown
-# value still ranks weakest here rather than crashing (fail closed).
-CONFIDENCE_RANK = {"HIGH": 2, "MEDIUM": 1}
+# LOW is a reserved token both upstreams document but never actually emit
+# (technical-analyst's compute_confidence(): "LOW is reserved, never
+# emitted"). Accepted here for forward-compatibility, ranked weakest.
+# Anything else (non-string, or a string outside this set) is INVALID
+# `<input>_unknown_confidence` -- never silently passed through (PR #249
+# user-review P1-2: an unvalidated "BANANA" used to reach gate_confidence
+# verbatim).
+VALID_CONFIDENCES = {"HIGH", "MEDIUM", "LOW"}
+CONFIDENCE_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
 # "Near stale" fires when age is within this many days of the configured
 # max age (and not already over it, which is INVALID `<input>_json_stale`).
@@ -284,7 +317,15 @@ def normalize_crowding(
     markets = markets_raw if isinstance(markets_raw, list) else []
     skipped_raw = raw_data.get("skipped")
     skipped_list = skipped_raw if isinstance(skipped_raw, list) else []
-    skipped_symbols = {s.get("symbol") for s in skipped_list if isinstance(s, dict)}
+    # Only string symbols are ever eligible to match --symbol (itself a
+    # string); filtering here also avoids ever trying to add an unhashable
+    # value (a list/dict "symbol" in an untrusted skip-entry) to this set,
+    # which would crash the set comprehension itself (PR #249 P1-1).
+    skipped_symbols = {
+        s.get("symbol")
+        for s in skipped_list
+        if isinstance(s, dict) and isinstance(s.get("symbol"), str)
+    }
 
     # Duplicate symbol rows in markets[] -> first match wins (the `next()`
     # pattern the detector itself uses; plan §3.2 v2 P2-7).
@@ -355,7 +396,11 @@ def normalize_crowding(
             warnings=tuple(warnings),
             report_path=report_path,
         )
-    if classification not in FADE_DIRECTION:
+    # Type guard BEFORE the allowlist membership check: `in`/`not in` on a
+    # dict requires the operand to be hashable, so an unhashable
+    # classification (e.g. a JSON list) would otherwise crash this line
+    # with TypeError instead of failing closed (PR #249 P1-1).
+    if not isinstance(classification, str) or classification not in FADE_DIRECTION:
         return NormalizedInput(
             kind=kind,
             state=STATE_INVALID,
@@ -485,6 +530,15 @@ def _validated_report_input(
         return NormalizedInput(
             kind=kind, state=STATE_INVALID, reason=f"{prefix}_malformed", report_path=report_path
         )
+    if not isinstance(report_direction, str):
+        # A non-null, non-string direction (a JSON list/dict/number/bool)
+        # is malformed input, not a legitimate mismatch to report against
+        # the detector's classification (PR #249 P1-1: every enum-shaped
+        # field must be type-validated before it participates in any
+        # comparison or membership check).
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason=f"{prefix}_malformed", report_path=report_path
+        )
     if detector.state == STATE_CONFIRMED and report_direction != detector.classification:
         return NormalizedInput(
             kind=kind,
@@ -538,12 +592,56 @@ def _validated_report_input(
     verdict_reason = raw_data.get("verdict_reason")
     confidence = raw_data.get("confidence")
 
+    # Type guard BEFORE the allowlist membership check: `verdict not in
+    # valid_verdicts` requires verdict to be hashable, so an unhashable
+    # verdict (e.g. a JSON list) would otherwise crash with TypeError
+    # instead of failing closed (PR #249 P1-1, the reported repro). A
+    # non-string verdict is malformed input; a string outside the
+    # allowlist is an unknown (but well-typed) verdict -- two distinct,
+    # named reasons.
+    if not isinstance(verdict, str):
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_malformed",
+            verdict=verdict,
+            as_of=as_of_value,
+            age_days=age_days,
+            report_path=report_path,
+        )
     if verdict not in valid_verdicts:
         return NormalizedInput(
             kind=kind,
             state=STATE_INVALID,
             reason=f"{prefix}_unknown_verdict",
             verdict=verdict,
+            as_of=as_of_value,
+            age_days=age_days,
+            report_path=report_path,
+        )
+
+    # Same two-step guard for confidence (PR #249 P1-1/P1-2): an unhashable
+    # confidence would otherwise crash `CONFIDENCE_RANK.get(...)` deep
+    # inside gate_confidence computation, and an unvalidated string (e.g.
+    # "BANANA") would otherwise pass straight through to the output
+    # contract's HIGH|MEDIUM|LOW|null field.
+    if not isinstance(confidence, str):
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_malformed",
+            verdict=verdict,
+            as_of=as_of_value,
+            age_days=age_days,
+            report_path=report_path,
+        )
+    if confidence not in VALID_CONFIDENCES:
+        return NormalizedInput(
+            kind=kind,
+            state=STATE_INVALID,
+            reason=f"{prefix}_unknown_confidence",
+            verdict=verdict,
+            confidence=confidence,
             as_of=as_of_value,
             age_days=age_days,
             report_path=report_path,
@@ -667,15 +765,21 @@ def normalize_price_action(
 def decide_setup_status(
     crowding: NormalizedInput, news: NormalizedInput, price: NormalizedInput
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
-    """Apply the precedence rules (module docstring) to the three
-    normalized inputs. Returns (setup_status, missing_confirmations,
+    """Apply the SEQUENTIAL precedence rules (module docstring, v4) to the
+    three normalized inputs. Returns (setup_status, missing_confirmations,
     extra_warnings) -- `extra_warnings` holds machine-level warnings (only
     `out_of_order_price_action` today); per-input warnings are merged by
-    the caller (`build_gate_result`)."""
+    the caller (`build_gate_result`).
+
+    Each step fully settles -- reaches a determination -- before the next
+    step's state is even inspected. This is what makes the "earlier
+    definitive verdicts are never softened by later problems" property
+    structural rather than something a rule-ordering audit has to keep
+    re-proving (PR #249 P1-3)."""
     missing: list[dict[str, Any]] = []
     extra_warnings: list[str] = []
 
-    # Rule 1: crowding evaluated first and exclusively.
+    # Step 1: crowding, evaluated first and exclusively.
     if crowding.state in (STATE_INVALID, STATE_INSUFFICIENT):
         missing.append({"step": STEP_CROWDING, "state": crowding.state, "reason": crowding.reason})
         return "INSUFFICIENT_EVIDENCE", missing, extra_warnings
@@ -688,61 +792,64 @@ def decide_setup_status(
             }
         )
         return "REJECTED", missing, extra_warnings
-
     # Crowding is CONFIRMED from here.
-    downstream = ((STEP_NEWS, news), (STEP_PRICE, price))
 
-    # Rule 2: any provided news/price INVALID -> INSUFFICIENT_EVIDENCE.
-    invalid_steps = [(step, inp) for step, inp in downstream if inp.state == STATE_INVALID]
-    if invalid_steps:
-        for step, inp in invalid_steps:
-            missing.append({"step": step, "state": inp.state, "reason": inp.reason})
-        return "INSUFFICIENT_EVIDENCE", missing, extra_warnings
+    def _settle(step: str, inp: NormalizedInput) -> tuple[str, list[dict[str, Any]]] | None:
+        """Settle one downstream step (news or price-action) against its
+        own four-way outcome. Returns (status, missing_entries) when the
+        step is definitive, or None when it's CONFIRMED (continue to the
+        next step) -- PENDING is handled separately by each call site
+        since its meaning differs between news (step 2) and price-action
+        (step 3, where it never blocks)."""
+        if inp.state == STATE_INVALID:
+            return "INSUFFICIENT_EVIDENCE", [
+                {"step": step, "state": inp.state, "reason": inp.reason}
+            ]
+        if inp.state == STATE_NOT_CONFIRMED:
+            return "REJECTED", [{"step": step, "state": inp.state, "reason": inp.reason}]
+        if inp.state == STATE_INSUFFICIENT:
+            return "INSUFFICIENT_EVIDENCE", [
+                {"step": step, "state": inp.state, "reason": inp.reason}
+            ]
+        return None
 
-    # Rule 3: any NOT_CONFIRMED -> REJECTED.
-    not_confirmed_steps = [
-        (step, inp) for step, inp in downstream if inp.state == STATE_NOT_CONFIRMED
-    ]
-    if not_confirmed_steps:
-        for step, inp in not_confirmed_steps:
-            missing.append({"step": step, "state": inp.state, "reason": inp.reason})
-        return "REJECTED", missing, extra_warnings
-
-    # Rule 4: any provided INSUFFICIENT -> INSUFFICIENT_EVIDENCE.
-    insufficient_steps = [
-        (step, inp) for step, inp in downstream if inp.state == STATE_INSUFFICIENT
-    ]
-    if insufficient_steps:
-        for step, inp in insufficient_steps:
-            missing.append({"step": step, "state": inp.state, "reason": inp.reason})
-        return "INSUFFICIENT_EVIDENCE", missing, extra_warnings
-
-    # From here, news/price can only be CONFIRMED or PENDING.
-    # Rule 5: out-of-order use (price confirmed while news still pending)
-    # caps at CROWDED with a warning.
-    if price.state == STATE_CONFIRMED and news.state == STATE_PENDING:
-        missing.append({"step": STEP_NEWS, "state": STATE_PENDING, "reason": "pending_step"})
-        extra_warnings.append("out_of_order_price_action")
-        return "CROWDED", missing, extra_warnings
-
-    # Rule 6: crowding only.
-    if news.state == STATE_PENDING and price.state == STATE_PENDING:
-        missing.append({"step": STEP_NEWS, "state": STATE_PENDING, "reason": "pending_step"})
-        missing.append({"step": STEP_PRICE, "state": STATE_PENDING, "reason": "pending_step"})
-        return "CROWDED", missing, extra_warnings
-
-    # Rule 7: crowding + news, price pending.
-    if news.state == STATE_CONFIRMED and price.state == STATE_PENDING:
-        missing.append({"step": STEP_PRICE, "state": STATE_PENDING, "reason": "pending_step"})
-        return "WATCHING_PRICE", missing, extra_warnings
-
-    # Rule 8: all three confirmed.
-    if news.state == STATE_CONFIRMED and price.state == STATE_CONFIRMED:
+    # Step 2: news. Fully settles before price-action is ever consulted --
+    # unless news itself is PENDING, in which case price-action is still
+    # evaluated next (out-of-order use, handled inside the PENDING branch).
+    if news.state != STATE_PENDING:
+        settled = _settle(STEP_NEWS, news)
+        if settled is not None:
+            status, entries = settled
+            missing.extend(entries)
+            return status, missing, extra_warnings
+        # news.state == CONFIRMED. Step 3: price-action.
+        if price.state == STATE_PENDING:
+            missing.append({"step": STEP_PRICE, "state": STATE_PENDING, "reason": "pending_step"})
+            return "WATCHING_PRICE", missing, extra_warnings
+        settled = _settle(STEP_PRICE, price)
+        if settled is not None:
+            status, entries = settled
+            missing.extend(entries)
+            return status, missing, extra_warnings
+        # price.state == CONFIRMED: all three confirmed.
         return "READY_FOR_PLAN", missing, extra_warnings
 
-    raise AssertionError(  # pragma: no cover - exhaustively covered above
-        f"unreachable state combination: C={crowding.state} N={news.state} P={price.state}"
-    )
+    # news.state == PENDING: out-of-order use. Price-action is still fully
+    # evaluated -- INVALID/NOT_CONFIRMED/INSUFFICIENT resolve normally; a
+    # CONFIRMED price-action caps the status at CROWDED with a warning
+    # (news was never actually confirmed, so this can't advance further).
+    missing.append({"step": STEP_NEWS, "state": STATE_PENDING, "reason": "pending_step"})
+    settled = _settle(STEP_PRICE, price)
+    if settled is not None:
+        status, entries = settled
+        missing.extend(entries)
+        return status, missing, extra_warnings
+    if price.state == STATE_CONFIRMED:
+        extra_warnings.append("out_of_order_price_action")
+        return "CROWDED", missing, extra_warnings
+    # price.state == PENDING too: crowding only.
+    missing.append({"step": STEP_PRICE, "state": STATE_PENDING, "reason": "pending_step"})
+    return "CROWDED", missing, extra_warnings
 
 
 def _weakest_confidence(a: str | None, b: str | None) -> str | None:
