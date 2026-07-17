@@ -203,6 +203,201 @@ class TestNumericValidatorsRejectDegenerateValues:
         assert result.returncode == 2
 
 
+# --- Section 2b: float64 overflow guards (code review round 1, P2) ---------
+#
+# --account-size/--multiplier/--tick-size/--fx-rate lacked a max_value cap
+# (unlike --risk-pct, which already had one) -- an individually "valid"
+# (finite, positive) but extreme value on one of these, or an extreme
+# --entry/--stop (deliberately left uncapped -- real prices have no reason
+# to be bounded), could make a COMPUTED intermediate (risk_budget,
+# risk_per_contract, or the tick-grid ratio) overflow to a non-finite
+# value, which used to escape as an uncaught OverflowError/ValueError --
+# exit 1, violating the two-class exit contract (2 config / 0 fail-closed
+# report -- never 1).
+
+
+class TestOverflowGuards:
+    BASE_ARGS = [
+        "--symbol", "ES",
+        "--direction", "LONG",
+        "--entry", "5000.25",
+        "--stop", "4980.00",
+        "--account-size", "100000",
+        "--risk-pct", "1.0",
+        "--as-of", "2026-07-17",
+    ]  # fmt: skip
+
+    UNKNOWN_SYMBOL_ARGS = [
+        "--symbol", "ZZZZ",
+        "--direction", "LONG",
+        "--entry", "100.0",
+        "--stop", "90.0",
+        "--contract-currency", "USD",
+        "--account-size", "100000",
+        "--risk-pct", "1.0",
+        "--as-of", "2026-07-17",
+    ]  # fmt: skip
+
+    def _with_override(self, base: list[str], flag: str, value: str) -> list[str]:
+        args = list(base)
+        idx = args.index(flag)
+        args[idx + 1] = value
+        return args
+
+    def test_repro_a_extreme_account_size_exits_2_not_1(self, tmp_path):
+        # Exact code-review repro A: --account-size 1.5e308 --risk-pct 10.0
+        # used to overflow risk_budget to inf, then crash with
+        # OverflowError inside math.floor() -- exit 1. Now caught by the
+        # --account-size argparse cap itself, before any risk math runs.
+        out_dir = tmp_path / "reports"
+        args = self._with_override(self.BASE_ARGS, "--account-size", "1.5e308")
+        args = self._with_override(args, "--risk-pct", "10.0")
+        args = [*args, "--output-dir", str(out_dir)]
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+        assert not out_dir.exists() or not any(out_dir.iterdir())
+
+    def test_repro_b_extreme_multiplier_override_exits_2_not_1(self, tmp_path):
+        # Exact code-review repro B: an unknown-symbol override with
+        # --multiplier 1e308 --tick-size 0.01 used to overflow
+        # risk_per_contract to inf, then crash writing the JSON report
+        # (allow_nan=False -> ValueError) -- exit 1. Now caught by the
+        # --multiplier argparse cap itself.
+        out_dir = tmp_path / "reports"
+        args = [
+            *self.UNKNOWN_SYMBOL_ARGS,
+            "--multiplier", "1e308",
+            "--tick-size", "0.01",
+            "--output-dir", str(out_dir),
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+        assert not out_dir.exists() or not any(out_dir.iterdir())
+
+    def test_account_size_boundary_at_cap_succeeds(self, tmp_path):
+        out_dir = tmp_path / "reports"
+        args = self._with_override(self.BASE_ARGS, "--account-size", "1e12")
+        args = [*args, "--output-dir", str(out_dir), "--format", "json"]
+        result = _run_cli(args)
+        assert result.returncode == 0
+
+    def test_account_size_boundary_above_cap_rejected(self):
+        args = self._with_override(self.BASE_ARGS, "--account-size", "1.1e12")
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+
+    def test_multiplier_boundary_at_cap_succeeds(self, tmp_path):
+        out_dir = tmp_path / "reports"
+        args = [
+            *self.UNKNOWN_SYMBOL_ARGS,
+            "--multiplier", "1e9",
+            "--tick-size", "0.01",
+            "--output-dir", str(out_dir),
+            "--format", "json",
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 0
+
+    def test_multiplier_boundary_above_cap_rejected(self):
+        args = [
+            *self.UNKNOWN_SYMBOL_ARGS,
+            "--multiplier", "1.1e9",
+            "--tick-size", "0.01",
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+
+    def test_tick_size_boundary_at_cap_succeeds(self, tmp_path):
+        # Entry/stop must be at least one 1e6-sized tick apart, or this
+        # would (correctly) hit stop_too_close instead of exercising the
+        # tick-size cap boundary itself.
+        out_dir = tmp_path / "reports"
+        args = [
+            "--symbol", "ZZZZ",
+            "--direction", "LONG",
+            "--entry", "3000000.0",
+            "--stop", "1000000.0",
+            "--multiplier", "1",
+            "--tick-size", "1e6",
+            "--contract-currency", "USD",
+            "--account-size", "100000",
+            "--risk-pct", "1.0",
+            "--as-of", "2026-07-17",
+            "--output-dir", str(out_dir),
+            "--format", "json",
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 0
+
+    def test_tick_size_boundary_above_cap_rejected(self):
+        args = [
+            *self.UNKNOWN_SYMBOL_ARGS,
+            "--multiplier", "1",
+            "--tick-size", "1.1e6",
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+
+    def test_fx_rate_boundary_at_cap_succeeds(self, tmp_path):
+        out_dir = tmp_path / "reports"
+        args = [
+            *self.BASE_ARGS,
+            "--fx-rate",
+            "1e6",
+            "--output-dir",
+            str(out_dir),
+            "--format",
+            "json",
+        ]
+        result = _run_cli(args)
+        assert result.returncode == 0
+
+    def test_fx_rate_boundary_above_cap_rejected(self):
+        args = [*self.BASE_ARGS, "--fx-rate", "1.1e6"]
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+
+    def test_one_trillion_account_size_control_case_still_sizes(self, tmp_path):
+        # The cap's own boundary value must still produce an ordinary,
+        # correct SIZED result -- the fix must never false-positive on a
+        # merely large (but finite) account size.
+        out_dir = tmp_path / "reports"
+        args = self._with_override(self.BASE_ARGS, "--account-size", "1e12")
+        args = [*args, "--output-dir", str(out_dir), "--format", "json"]
+        result = _run_cli(args)
+        assert result.returncode == 0
+        payload = json.loads((out_dir / "futures_position_size_ES_2026-07-17.json").read_text())
+        assert payload["sizing_status"] == "SIZED"
+        assert payload["risk_budget_usd"] == pytest.approx(1e12 * 1.0 / 100.0)
+
+    def test_extreme_entry_uncapped_flag_still_exits_2_not_1(self, tmp_path):
+        # --entry deliberately has NO max_value cap (real prices are never
+        # artificially bounded) -- this is the residual overflow route the
+        # argparse-level caps on multiplier/tick-size/fx-rate alone cannot
+        # prevent. Only the isfinite() guard on the computed
+        # risk_per_contract catches it. Must exit 2 cleanly, never crash.
+        out_dir = tmp_path / "reports"
+        args = [
+            "--symbol", "ES",
+            "--direction", "LONG",
+            "--entry", "1e308",
+            "--stop", "1.0",
+            "--account-size", "100000",
+            "--risk-pct", "1.0",
+            "--output-dir", str(out_dir),
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+        assert not out_dir.exists() or not any(out_dir.iterdir())
+
+
 # --- Section 3: mode A / mode B end-to-end (in-process via cli.main) -------
 
 

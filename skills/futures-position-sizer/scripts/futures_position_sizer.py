@@ -127,7 +127,18 @@ def _as_of_type(value: str) -> str:
     return value
 
 
+# Sane upper bounds for numeric flags whose PRODUCT feeds risk math (never
+# individually implausible, but an extreme value on one of these combined
+# with another can overflow float64 before the defense-in-depth isfinite()
+# guards in futures_sizing.size_futures_position ever run -- capping here
+# means the failure is an ordinary argparse usage error, exit 2, with a
+# clear message, rather than a silent OverflowError/ValueError crash deeper
+# in the pipeline). Each bound is generously above any plausible real value:
 RISK_PCT_MAX = 10.0
+ACCOUNT_SIZE_MAX = 1e12  # $1 trillion -- no real trading account approaches this
+MULTIPLIER_MAX = 1e9  # largest core-table multiplier (J6) is 1.25e7
+TICK_SIZE_MAX = 1e6  # largest core-table tick_size (YM) is 1.0
+FX_RATE_MAX = 1e6  # no real currency pair trades at anywhere near this rate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -144,7 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gate-json", help="contrarian-setup-gate JSON report path (mode B: gate handoff)"
     )
-    parser.add_argument("--account-size", type=_strict_float_type(), help="Account size in USD")
+    parser.add_argument(
+        "--account-size",
+        type=_strict_float_type(max_value=ACCOUNT_SIZE_MAX),
+        help="Account size in USD",
+    )
     parser.add_argument(
         "--risk-pct",
         type=_strict_float_type(max_value=RISK_PCT_MAX),
@@ -159,12 +174,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--fx-rate",
-        type=_strict_float_type(),
+        type=_strict_float_type(max_value=FX_RATE_MAX),
         default=None,
         help="Contract-currency-to-USD rate. REQUIRED if the contract's currency != USD",
     )
-    parser.add_argument("--multiplier", type=_strict_float_type(), default=None)
-    parser.add_argument("--tick-size", type=_strict_float_type(), default=None)
+    parser.add_argument(
+        "--multiplier", type=_strict_float_type(max_value=MULTIPLIER_MAX), default=None
+    )
+    parser.add_argument(
+        "--tick-size", type=_strict_float_type(max_value=TICK_SIZE_MAX), default=None
+    )
     parser.add_argument("--contract-currency", default=None)
     parser.add_argument(
         "--as-of",

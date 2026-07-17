@@ -448,8 +448,15 @@ def geometry_ok(direction: str, entry: float, stop: float) -> bool:
     raise ValueError(f"unknown direction {direction!r}")  # pragma: no cover - CLI enforces the enum
 
 
-def _tick_ratio_and_nearest(distance: float, tick_size: float) -> tuple[float, int]:
+def _tick_ratio_and_nearest(distance: float, tick_size: float) -> tuple[float, int | None]:
+    """`nearest` is `None` when `ratio` itself overflowed to a non-finite
+    value (an extreme, uncapped `--entry`/`--stop` divided by a small
+    `tick_size` can do this even though both inputs are individually
+    finite) -- `round()` on a non-finite float raises `OverflowError`, so
+    callers must check for `None` instead of calling `round()` themselves."""
     ratio = distance / tick_size
+    if not math.isfinite(ratio):
+        return ratio, None
     return ratio, round(ratio)
 
 
@@ -458,8 +465,16 @@ def is_on_tick_grid(price: float, tick_size: float, rel_eps: float = GRID_REL_EP
     from 0), within a relative-epsilon tolerance that absorbs float64
     representation noise but not a genuine off-grid price. Used both for
     the bond-family hard off-grid rejection and the soft `off_tick_grid`
-    warning on every other symbol."""
+    warning on every other symbol.
+
+    Never raises: a `price`/`tick_size` combination whose ratio overflows
+    to a non-finite value is treated as maximally off-grid (`False`) rather
+    than crashing -- the caller's own fail-closed handling (a bond-family
+    ConfigError, or a warning for every other symbol) takes it from there;
+    this function's only job is never to be the uncaught-exception source."""
     ratio, nearest = _tick_ratio_and_nearest(price, tick_size)
+    if nearest is None:
+        return False
     if nearest == 0:
         # A price within one tick of zero is not a realistic futures
         # price for any symbol in this table, but guard the divide
@@ -491,7 +506,21 @@ def _format_ticks(ticks: float) -> int | float:
     contract's worked example: `stop_distance_ticks: 81`, not `81.0`);
     otherwise round to 2 decimals (off-grid symbols only warn, they are
     never forced onto the grid, so a fractional tick count is legitimate
-    and reported at 2dp per plan)."""
+    and reported at 2dp per plan).
+
+    Never raises: `round(ticks)` (no ndigits -> converts to int) raises
+    `OverflowError` on a non-finite `ticks` -- an extreme, uncapped
+    `--entry`/`--stop` divided by a small `tick_size` can produce one even
+    though both inputs are individually finite. `round(ticks, 2)` (WITH
+    ndigits -> stays a float) never raises for a non-finite input, so the
+    non-finite branch uses that form. The resulting non-finite value is
+    always transient here: `size_futures_position`'s own
+    `math.isfinite(risk_per_contract)` guard raises `ConfigError` before
+    this result dict is ever written out, since the same extreme inputs
+    that overflow the tick ratio also overflow the risk-per-contract
+    product."""
+    if not math.isfinite(ticks):
+        return round(ticks, 2)
     nearest = round(ticks)
     if abs(ticks - nearest) < 1e-6:
         return int(nearest)
@@ -765,10 +794,37 @@ def size_futures_position(
     result["stop_distance_points"] = round(distance, 8)
     result["stop_distance_ticks"] = _format_ticks(ticks_exact)
 
+    # Defense-in-depth against float64 overflow: every operand here (entry,
+    # stop, multiplier, fx_rate, account_size, risk_pct) already passed its
+    # own argparse-level max_value cap, but the PRODUCT of several
+    # individually-valid large values can still overflow to inf (e.g. an
+    # extreme --account-size times a double-digit --risk-pct). An
+    # uncaught inf would otherwise reach math.floor() inside
+    # compute_contracts() (raises OverflowError) or the JSON writer's
+    # allow_nan=False (raises ValueError) -- both uncaught crashes, exit 1,
+    # violating the two-class exit contract (2 config / 0 fail-closed
+    # report -- never 1). Both risk_per_contract and risk_budget are
+    # entirely operator-supplied in both modes (never gate-sourced), so a
+    # ConfigError (exit 2, no report) is the correct class here, same as
+    # resolve_spec's and requires_fx_rate's own operator-side errors.
     risk_per_contract = distance * spec["multiplier"] * fx_rate
+    if not math.isfinite(risk_per_contract):
+        raise ConfigError(
+            f"computed risk_per_contract is not finite (stop_distance={distance}, "
+            f"multiplier={spec['multiplier']}, fx_rate={fx_rate}) -- one of "
+            "--multiplier/--tick-size/--fx-rate (or an unknown-symbol override) "
+            "is unreasonably large",
+            reason="risk_per_contract_overflow",
+        )
     result["risk_per_contract_usd"] = round(risk_per_contract, 2)
 
     risk_budget = account_size * risk_pct / 100.0
+    if not math.isfinite(risk_budget):
+        raise ConfigError(
+            f"computed risk_budget is not finite (account_size={account_size}, "
+            f"risk_pct={risk_pct}) -- --account-size is unreasonably large",
+            reason="risk_budget_overflow",
+        )
     result["risk_budget_usd"] = round(risk_budget, 2)
 
     if risk_pct > RISK_PCT_WARNING_THRESHOLD:

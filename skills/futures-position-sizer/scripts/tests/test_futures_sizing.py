@@ -10,6 +10,8 @@ being complete.
 
 from __future__ import annotations
 
+import math
+
 import futures_sizing as fs
 import pytest
 
@@ -377,6 +379,73 @@ class TestSizeFuturesPositionModeA:
         # the unrounded product would be a test artifact, not a real bug.
         assert result["risk_per_contract_usd"] == round(20.25 * 50 * 1.25, 2)
         assert result["fx_rate_used"] == 1.25
+
+
+# --- size_futures_position: float64 overflow defense-in-depth --------------
+#
+# The CLI layer caps --account-size/--multiplier/--tick-size/--fx-rate so an
+# individually-extreme flag is an ordinary argparse usage error (see
+# test_futures_position_sizer.py). These tests exercise the pure module's
+# OWN isfinite() guards directly, bypassing any CLI-level cap entirely --
+# the module must never crash with an uncaught OverflowError/ValueError
+# regardless of what a caller (CLI today, anything else tomorrow) passes it.
+
+
+class TestSizeFuturesPositionOverflowGuards:
+    def base_kwargs(self, **overrides):
+        kwargs = dict(
+            symbol="ES",
+            direction="LONG",
+            entry=5000.25,
+            stop=4980.00,
+            stop_source="operator",
+            spec=ES_SPEC,
+            account_size=100_000.0,
+            risk_pct=2.0,
+            max_contracts=None,
+            fx_rate=1.0,
+            as_of="2026-07-17",
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_risk_budget_overflow_raises_config_error(self):
+        # account_size * risk_pct / 100 overflows to inf. Individually,
+        # 1.5e308 is a "valid" (finite, positive) float -- only the PRODUCT
+        # overflows, which is exactly what the CLI-level per-flag caps can't
+        # catch on their own (repro A from code review round 1).
+        with pytest.raises(fs.ConfigError) as exc_info:
+            fs.size_futures_position(**self.base_kwargs(account_size=1.5e308, risk_pct=10.0))
+        assert exc_info.value.reason == "risk_budget_overflow"
+
+    def test_risk_per_contract_overflow_raises_config_error(self):
+        # distance * multiplier * fx_rate overflows to inf via an extreme
+        # unknown-symbol-override multiplier (repro B from code review
+        # round 1).
+        huge_spec = dict(ES_SPEC, multiplier=1e308, tick_size=0.01, tick_value=1e306)
+        with pytest.raises(fs.ConfigError) as exc_info:
+            fs.size_futures_position(**self.base_kwargs(spec=huge_spec))
+        assert exc_info.value.reason == "risk_per_contract_overflow"
+
+    def test_risk_per_contract_overflow_via_extreme_entry_not_multiplier(self):
+        # A second route to the SAME overflow: an extreme --entry (which the
+        # CLI deliberately does NOT cap -- real prices have no reason to be
+        # bounded) combined with an ordinary multiplier. This is the case
+        # the argparse-level caps on multiplier/tick-size/fx-rate alone
+        # cannot prevent -- only the isfinite() guard on the computed
+        # product can.
+        with pytest.raises(fs.ConfigError) as exc_info:
+            fs.size_futures_position(**self.base_kwargs(entry=1e308, stop=1.0))
+        assert exc_info.value.reason == "risk_per_contract_overflow"
+
+    def test_one_trillion_account_size_still_sizes_normally(self):
+        # Control case: the largest account size the CLI's new cap allows
+        # must still size an ordinary trade correctly -- the guard must
+        # never false-positive on a merely LARGE (but finite) value.
+        result = fs.size_futures_position(**self.base_kwargs(account_size=1e12, risk_pct=1.0))
+        assert result["sizing_status"] == "SIZED"
+        assert result["risk_budget_usd"] == pytest.approx(1e12 * 1.0 / 100.0)
+        assert math.isfinite(result["risk_budget_usd"])
 
 
 # --- size_futures_position: mode B (gate-supplied stop) --------------------
