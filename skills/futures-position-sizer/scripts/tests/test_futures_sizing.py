@@ -358,6 +358,33 @@ class TestSizeFuturesPositionModeA:
             )
         assert exc_info.value.reason == "stop_off_tick_grid"
 
+    def test_extreme_bond_entry_gets_overflow_attribution_not_32nds(self):
+        # Code review round 3, P3: an extreme --entry on a BOND symbol used
+        # to raise the 32nds-notation message (misleading -- the ratio
+        # price/tick_size overflowed, this isn't a genuine off-grid
+        # notation mistake). Must now fall through to the correctly-
+        # attributed risk_per_contract_overflow error instead.
+        with pytest.raises(fs.ConfigError) as exc_info:
+            fs.size_futures_position(
+                **self.base_kwargs(symbol="ZB", spec=ZB_SPEC, entry=1e308, stop=1.0)
+            )
+        assert exc_info.value.reason == "risk_per_contract_overflow"
+        assert exc_info.value.reason != "entry_off_tick_grid"
+        message = str(exc_info.value)
+        assert "32nds" not in message
+        assert "--entry" in message
+
+    def test_normal_off_grid_bond_entry_still_gets_32nds_message(self):
+        # Regression guard: an ordinary (finite) off-grid bond price must
+        # still get the 32nds-notation message, not be misrouted into the
+        # overflow path.
+        with pytest.raises(fs.ConfigError) as exc_info:
+            fs.size_futures_position(
+                **self.base_kwargs(symbol="ZB", spec=ZB_SPEC, entry=110.16, stop=108.00)
+            )
+        assert exc_info.value.reason == "entry_off_tick_grid"
+        assert "32nds" in str(exc_info.value)
+
     def test_risk_pct_above_2_warns(self):
         result = fs.size_futures_position(**self.base_kwargs(risk_pct=3.0))
         assert "risk_pct_above_2" in result["warnings"]

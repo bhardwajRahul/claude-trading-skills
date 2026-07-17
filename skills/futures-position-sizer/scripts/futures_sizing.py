@@ -448,6 +448,16 @@ def geometry_ok(direction: str, entry: float, stop: float) -> bool:
     raise ValueError(f"unknown direction {direction!r}")  # pragma: no cover - CLI enforces the enum
 
 
+def _tick_ratio_is_finite(price: float, tick_size: float) -> bool:
+    """True unless `price / tick_size` itself overflows to a non-finite
+    value. Used by the bond-family off-grid check to distinguish a
+    genuinely off-grid price from a price so extreme (an uncapped
+    --entry/--stop) that the ratio computation overflowed -- the two need
+    different ConfigError messages (see the bond-family off-grid block in
+    `size_futures_position`)."""
+    return math.isfinite(price / tick_size)
+
+
 def _tick_ratio_and_nearest(distance: float, tick_size: float) -> tuple[float, int | None]:
     """`nearest` is `None` when `ratio` itself overflowed to a non-finite
     value (an extreme, uncapped `--entry`/`--stop` divided by a small
@@ -757,13 +767,26 @@ def size_futures_position(
     # --- Off-grid handling: bond family is a hard, mode-aware rejection;
     # every other symbol only warns. Entry is ALWAYS operator-supplied in
     # both modes, so an off-grid entry is always a ConfigError.
+    #
+    # `_tick_ratio_is_finite` gates each bond off-grid check: an extreme
+    # (>~1e300) --entry/--stop makes the price/tick_size ratio itself
+    # overflow to a non-finite value, which `is_on_tick_grid` treats as
+    # "not on grid" (False) -- correct on its own, but raising the 32nds-
+    # notation ConfigError here would misattribute an overflow as a
+    # notation mistake (code review round 3, P3). When the ratio has
+    # overflowed, this deliberately skips straight past the bond-specific
+    # check instead -- every bond-family multiplier (1000-2000) is large
+    # enough relative to a tick_size in the 0.001-0.03 range that any
+    # --entry/--stop extreme enough to overflow THIS ratio always also
+    # overflows `risk_per_contract` a few lines below, where the correctly-
+    # attributed overflow ConfigError is raised instead.
     if is_bond:
-        if not is_on_tick_grid(entry, tick_size):
+        if _tick_ratio_is_finite(entry, tick_size) and not is_on_tick_grid(entry, tick_size):
             raise ConfigError(
                 _bond_off_grid_message(symbol, "entry", entry, tick_size),
                 reason="entry_off_tick_grid",
             )
-        if not is_on_tick_grid(stop, tick_size):
+        if _tick_ratio_is_finite(stop, tick_size) and not is_on_tick_grid(stop, tick_size):
             if stop_source == "operator":
                 raise ConfigError(
                     _bond_off_grid_message(symbol, "stop", stop, tick_size),
@@ -810,9 +833,10 @@ def size_futures_position(
     risk_per_contract = distance * spec["multiplier"] * fx_rate
     if not math.isfinite(risk_per_contract):
         raise ConfigError(
-            f"computed risk_per_contract is not finite (stop_distance={distance}, "
-            f"multiplier={spec['multiplier']}, fx_rate={fx_rate}) -- one of "
-            "--multiplier/--tick-size/--fx-rate (or an unknown-symbol override) "
+            f"computed risk_per_contract is not finite (entry={entry}, stop={stop}, "
+            f"stop_distance={distance}, multiplier={spec['multiplier']}, "
+            f"fx_rate={fx_rate}) -- --entry/--stop (the distance between them), or "
+            "--multiplier/--tick-size/--fx-rate (or an unknown-symbol override), "
             "is unreasonably large",
             reason="risk_per_contract_overflow",
         )

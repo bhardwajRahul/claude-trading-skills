@@ -397,6 +397,50 @@ class TestOverflowGuards:
         assert "Traceback" not in result.stderr
         assert not out_dir.exists() or not any(out_dir.iterdir())
 
+    def test_extreme_bond_entry_gets_overflow_message_not_32nds(self, tmp_path):
+        # Code review round 3, P3: an extreme --entry (>1e300) on a BOND
+        # symbol used to trip the 32nds-notation ConfigError, misattributing
+        # a numeric overflow as a notation mistake. Must exit 2 with an
+        # overflow/magnitude message instead, and never mention "32nds".
+        out_dir = tmp_path / "reports"
+        args = [
+            "--symbol", "ZB",
+            "--direction", "LONG",
+            "--entry", "1e308",
+            "--stop", "1.0",
+            "--account-size", "100000",
+            "--risk-pct", "1.0",
+            "--output-dir", str(out_dir),
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+        assert "32nds" not in result.stderr
+        assert "not finite" in result.stderr
+        assert "--entry" in result.stderr
+        assert not out_dir.exists() or not any(out_dir.iterdir())
+
+    def test_normal_off_grid_bond_entry_still_gets_32nds_message(self, tmp_path):
+        # Regression guard for the same fix: an ordinary, finite off-grid
+        # bond entry (the classic 110.16-vs-110'16 mistype) must still be
+        # rejected with the 32nds-notation message, not misrouted into the
+        # overflow path.
+        out_dir = tmp_path / "reports"
+        args = [
+            "--symbol", "ZB",
+            "--direction", "LONG",
+            "--entry", "110.16",
+            "--stop", "108.00",
+            "--account-size", "100000",
+            "--risk-pct", "1.0",
+            "--output-dir", str(out_dir),
+        ]  # fmt: skip
+        result = _run_cli(args)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+        assert "32nds" in result.stderr
+        assert not out_dir.exists() or not any(out_dir.iterdir())
+
 
 # --- Section 3: mode A / mode B end-to-end (in-process via cli.main) -------
 
