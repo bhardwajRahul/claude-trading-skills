@@ -48,7 +48,7 @@ SKILL_NAME = "contrarian-setup-gate"
 
 
 def _contains_non_finite(value: Any) -> bool:
-    """Recursively check whether a JSON-parsed structure contains any
+    """Iteratively check whether a JSON-parsed structure contains any
     non-finite float (`inf`, `-inf`, `nan`) ANYWHERE -- at any depth, in
     any dict value or list item, regardless of whether that field is one
     the gate actually reads. Catches both a syntactically valid JSON
@@ -57,13 +57,30 @@ def _contains_non_finite(value: Any) -> bool:
     the overflow happens inside `float()` itself, after the token has
     already been recognized as an ordinary number) and the bare
     `Infinity`/`-Infinity`/`NaN` literals `json.loads` accepts by default
-    as a non-standard extension (PR #249 user-review round 3)."""
-    if isinstance(value, float):
-        return not math.isfinite(value)
-    if isinstance(value, dict):
-        return any(_contains_non_finite(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_contains_non_finite(item) for item in value)
+    as a non-standard extension (PR #249 user-review round 3).
+
+    Uses an explicit stack, NOT recursion: an ordinary, legitimate JSON
+    document can be nested hundreds of levels deep (all finite, in a
+    field the gate never even reads) and is perfectly valid input -- a
+    recursive walker raises `RecursionError` well before that (confirmed
+    empirically: a plain recursive version of this function fails
+    starting around depth ~500, since each JSON nesting level costs more
+    than one Python call frame once the `any(... for ...)` generator
+    expressions are counted), which used to crash the CLI with exit 1 on
+    a file that should have produced a completely NORMAL result (PR #249
+    user-review round 4). The iterative form has no depth limit -- it is
+    bounded only by available memory, not the call stack -- and is O(n)
+    over the total number of scalar/container nodes in the structure."""
+    stack: list[Any] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                return True
+        elif isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
     return False
 
 
@@ -116,6 +133,18 @@ def load_json_file(path: str) -> tuple[Any | None, str | None]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
+        return None, "parse_error"
+    except RecursionError:
+        # json.loads itself -- not just our own scanner -- can raise this
+        # on extreme nesting. Confirmed empirically in this environment:
+        # the C accelerator handles depth 100,000 fine but raises
+        # RecursionError around depth 200,000 ("Stack overflow ... while
+        # decoding a JSON array"). RecursionError is NOT a ValueError /
+        # JSONDecodeError subclass, so it must be caught explicitly, or
+        # it escapes this function entirely and crashes the CLI (PR #249
+        # user-review round 4). Routed to the same structured
+        # `parse_error` class as any other unparsable input -- exit 0,
+        # a report is still written, named `<input>_parse_error`.
         return None, "parse_error"
     if _contains_non_finite(data):
         return None, "non_finite"

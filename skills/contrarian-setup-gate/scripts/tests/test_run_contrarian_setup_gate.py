@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import gate_logic
 import pytest
@@ -138,6 +139,146 @@ def test_contains_non_finite_directly() -> None:
     assert cli._contains_non_finite({"a": [1, 2, 3], "b": "text", "c": None, "d": True}) is False
     assert cli._contains_non_finite(1.372) is False
     assert cli._contains_non_finite(42) is False
+
+
+# --- Section 1c: PR #249 user-review round 4 -- iterative scan, decoder limits --
+
+
+def _deep_nested_list(depth: int, leaf: Any) -> Any:
+    """Build a genuinely nested Python list `depth` levels deep, with
+    `leaf` at the bottom -- e.g. depth=3, leaf=1 -> [[[1]]]."""
+    value = leaf
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_contains_non_finite_deep_but_all_finite_returns_false_no_recursion_error() -> None:
+    """(a) unit level: THE USER'S ROUND-4 REPRO shape -- a legitimate,
+    all-finite structure nested 500 levels deep must return False without
+    raising RecursionError. A plain recursive implementation of this
+    function is confirmed (empirically, in this environment) to raise
+    RecursionError somewhere between depth 300 and depth 500."""
+    deep_finite = _deep_nested_list(500, leaf=1)
+    assert cli._contains_non_finite(deep_finite) is False
+
+
+def test_contains_non_finite_deep_with_non_finite_leaf_returns_true_no_recursion_error() -> None:
+    """(b) unit level: the same depth, but the leaf is non-finite -- must
+    still be detected, and still without raising."""
+    deep_non_finite = _deep_nested_list(500, leaf=float("inf"))
+    assert cli._contains_non_finite(deep_non_finite) is True
+
+
+def test_load_json_file_deep_but_finite_nested_field_loads_normally(tmp_path: Path) -> None:
+    """(a) load_json_file level: a real detector-shaped file with an
+    extra, unused, all-finite field nested 500 levels deep must load
+    completely normally -- reason is None, exactly as if the field were
+    absent."""
+    fixture = _detector_fixture()
+    fixture["_deep_unused_field"] = _deep_nested_list(500, leaf=1)
+    path = tmp_path / "deep_finite.json"
+    path.write_text(json.dumps(fixture), encoding="utf-8")
+    data, reason = cli.load_json_file(str(path))
+    assert reason is None
+    assert data["markets"][0]["classification"] == "CROWDED_SHORT"
+
+
+def test_load_json_file_deep_with_non_finite_leaf_is_non_finite(tmp_path: Path) -> None:
+    """(b) load_json_file level: same shape, but the deeply-nested leaf
+    is non-finite -- must still be caught as `non_finite`."""
+    fixture = _detector_fixture()
+    fixture["_deep_unused_field"] = _deep_nested_list(500, leaf=float("inf"))
+    path = tmp_path / "deep_non_finite.json"
+    path.write_text(json.dumps(fixture), encoding="utf-8")
+    data, reason = cli.load_json_file(str(path))
+    assert data is None
+    assert reason == "non_finite"
+
+
+def test_load_json_file_extreme_nesting_beyond_decoder_limit_is_parse_error(tmp_path: Path) -> None:
+    """(c) A depth far beyond what even the JSON decoder itself can
+    handle must fail closed as `parse_error`, not crash with an uncaught
+    RecursionError. Verified empirically in this environment: json.loads
+    on a `[[[...1...]]]` string handles depth 100,000 fine but raises
+    RecursionError around depth 200,000 ("Stack overflow ... while
+    decoding a JSON array") -- 250,000 is comfortably past that
+    threshold. RecursionError is NOT a subclass of json.JSONDecodeError
+    or ValueError, so it must be caught explicitly."""
+    depth = 250_000
+    raw_text = "[" * depth + "1" + "]" * depth
+    path = tmp_path / "extreme_nesting.json"
+    path.write_text(raw_text, encoding="utf-8")
+    data, reason = cli.load_json_file(str(path))
+    assert data is None
+    assert reason == "parse_error"
+
+
+def test_cli_deep_but_finite_unused_field_produces_normal_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(a) End-to-end: a detector report with an unused, all-finite,
+    deeply-nested field must produce the EXACT SAME result as the
+    ordinary fixture without that field -- CROWDED, not a rejection. The
+    non-finite scan must have zero false-positive cost on legitimate
+    input, however deeply nested."""
+    fixture = _detector_fixture()
+    fixture["_deep_unused_field"] = _deep_nested_list(500, leaf=1)
+    detector_path = tmp_path / "detector.json"
+    detector_path.write_text(json.dumps(fixture), encoding="utf-8")
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        ["--symbol", SYMBOL, "--detector-json", str(detector_path), "--as-of", AS_OF],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "CROWDED"
+    assert result["direction"] == "LONG"
+
+
+def test_cli_deep_with_non_finite_leaf_produces_non_finite_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b) End-to-end: the same shape, but the deep leaf is non-finite --
+    exit 0, both reports written, reason detector_non_finite."""
+    fixture = _detector_fixture()
+    fixture["_deep_unused_field"] = _deep_nested_list(500, leaf=float("inf"))
+    detector_path = tmp_path / "detector.json"
+    detector_path.write_text(json.dumps(fixture), encoding="utf-8")
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        ["--symbol", SYMBOL, "--detector-json", str(detector_path), "--as-of", AS_OF],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert any(item["reason"] == "detector_non_finite" for item in result["missing_confirmations"])
+
+
+def test_cli_extreme_nesting_beyond_decoder_limit_produces_parse_error_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(c) End-to-end: nesting far beyond the decoder's own limit must
+    exit 0 with a full report naming detector_parse_error, never crash."""
+    depth = 250_000
+    raw_text = "[" * depth + "1" + "]" * depth
+    detector_path = tmp_path / "detector.json"
+    detector_path.write_text(raw_text, encoding="utf-8")
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        ["--symbol", SYMBOL, "--detector-json", str(detector_path), "--as-of", AS_OF],
+    )
+    assert exit_code == 0
+    json_path = tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json"
+    md_path = tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.md"
+    assert json_path.exists()
+    assert md_path.exists()
+    result = json.loads(json_path.read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert any(item["reason"] == "detector_parse_error" for item in result["missing_confirmations"])
 
 
 # --- Section 2: fixture builders (real-schema shapes) -----------------------
