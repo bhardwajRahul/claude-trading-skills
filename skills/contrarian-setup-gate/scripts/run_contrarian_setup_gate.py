@@ -114,7 +114,16 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def generate_json_report(result: dict[str, Any], output_path: Path) -> None:
-    output_path.write_text(json.dumps(result, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    # allow_nan=False is defense-in-depth (PR #249 user-review round 2,
+    # P1-B): gate_logic's own validation should already reject any
+    # non-finite number before it reaches this payload, but if one ever
+    # did slip through, json.dumps would otherwise silently emit the
+    # non-standard `Infinity`/`-Infinity`/`NaN` literals instead of
+    # raising -- this makes that failure loud instead of producing an
+    # invalid JSON file.
+    output_path.write_text(
+        json.dumps(result, indent=2, sort_keys=False, allow_nan=False) + "\n", encoding="utf-8"
+    )
 
 
 def _fmt(value: Any) -> str:

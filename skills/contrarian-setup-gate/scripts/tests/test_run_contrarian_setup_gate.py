@@ -413,6 +413,195 @@ def test_cli_news_confidence_banana_fails_closed_not_passthrough(
     assert result["missing_confirmations"][0]["reason"] == "news_unknown_confidence"
 
 
+def test_cli_price_verdict_reason_banana_p1_a_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE USER'S P1-A REPRO, end-to-end: verdict_reason "BANANA" on a
+    CONFIRMED price-action report used to reach READY_FOR_PLAN with
+    entry_trigger="price-action confirmation: BANANA"."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
+    price_data = _price_fixture(verdict="CONFIRMED")
+    price_data["verdict_reason"] = "BANANA"
+    price_path = _write(tmp_path, "price.json", price_data)
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--price-action-json",
+            price_path,
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["entry_trigger"] is None
+    assert result["inputs"]["price_action"]["state"] == "INVALID"
+    assert result["missing_confirmations"][0]["reason"] == "price_action_unknown_reason"
+
+
+def test_cli_price_verdict_reason_missing_p1_a_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE USER'S P1-A REPRO (missing variant), end-to-end: a null
+    verdict_reason on a CONFIRMED report used to reach READY_FOR_PLAN with
+    entry_trigger=null."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
+    price_data = _price_fixture(verdict="CONFIRMED")
+    price_data["verdict_reason"] = None
+    price_path = _write(tmp_path, "price.json", price_data)
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--price-action-json",
+            price_path,
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["missing_confirmations"][0]["reason"] == "price_action_malformed"
+
+
+def test_cli_price_stop_reference_overflow_to_infinity_p1_b_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE USER'S P1-B REPRO, end-to-end: `stop_reference: 1e309` is a
+    syntactically valid JSON number that overflows to Python's `inf` on
+    parse. This used to reach READY_FOR_PLAN with
+    "invalidation_level": Infinity in the written file -- not valid
+    standard JSON, and unusable as a stop level for a downstream
+    position-sizing skill."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
+    price_data = _price_fixture(verdict="CONFIRMED")
+    price_data["swing_levels"]["stop_reference"] = 1e309
+    price_data["handoff"]["price_action"]["stop_reference"] = 1e309
+    price_path = _write(tmp_path, "price.json", price_data)
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--price-action-json",
+            price_path,
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    output_path = tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json"
+    output_text = output_path.read_text()
+    assert "Infinity" not in output_text  # never emitted, even indirectly
+    result = json.loads(output_text)  # standard-JSON-compliant: no NaN/Infinity tokens to parse
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["invalidation_level"] is None
+    assert result["missing_confirmations"][0]["reason"] == "price_action_invalid_stop_reference"
+
+
+def test_cli_price_stop_reference_nan_literal_p1_b_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare `NaN` JSON literal (a non-standard extension `json.loads`
+    accepts by default) must also fail closed, not just numeric overflow."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
+    price_data = _price_fixture(verdict="CONFIRMED")
+    price_path = tmp_path / "price_nan.json"
+    raw_text = json.dumps(price_data).replace("1.372", "NaN")
+    price_path.write_text(raw_text, encoding="utf-8")
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--price-action-json",
+            str(price_path),
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["missing_confirmations"][0]["reason"] == "price_action_invalid_stop_reference"
+
+
+def test_cli_price_stop_reference_bool_true_p1_b_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`isinstance(True, int)` is True in Python -- a bare `true` JSON
+    literal for stop_reference must not silently pass as 1.0."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
+    price_data = _price_fixture(verdict="CONFIRMED")
+    price_data["swing_levels"]["stop_reference"] = True
+    price_data["handoff"]["price_action"]["stop_reference"] = True
+    price_path = _write(tmp_path, "price.json", price_data)
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--price-action-json",
+            price_path,
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["missing_confirmations"][0]["reason"] == "price_action_invalid_stop_reference"
+
+
+def test_generate_json_report_allow_nan_false_raises_on_residual_non_finite_value(
+    tmp_path: Path,
+) -> None:
+    """Writer-level defense-in-depth test (PR #249 user-review round 2,
+    P1-B): if a non-finite float ever slipped past gate_logic's own
+    validation (a future regression), the CLI's JSON writer must raise
+    loudly via allow_nan=False rather than silently emitting non-standard
+    JSON."""
+    bad_result = {"setup_status": "READY_FOR_PLAN", "invalidation_level": float("inf")}
+    output_path = tmp_path / "bad.json"
+    with pytest.raises(ValueError):
+        cli.generate_json_report(bad_result, output_path)
+
+
 def test_cli_format_json_only_skips_markdown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

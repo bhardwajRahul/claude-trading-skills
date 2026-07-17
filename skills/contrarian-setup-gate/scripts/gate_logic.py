@@ -69,6 +69,7 @@ soften crowding's own conclusion.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -115,6 +116,19 @@ CHECK_REASON_TO_KEY = {
     "failed_extreme": "failed_extreme",
     "failed_breakout": "failed_breakout",
 }
+
+# The exhaustive set of verdict_reason tokens technical-analyst can emit
+# for a CONFIRMED verdict (weekly_price_action.CHECK_REASON_MAP's values,
+# verified against the merged source). Derived from CHECK_REASON_TO_KEY's
+# keys so the two can never drift apart within this module; a cross-skill
+# consistency test in test_gate_logic.py additionally pins this against
+# TA's own source, so upstream drift there is caught, not silently
+# trusted (PR #249 user-review round 2, P1-A). Unlike news's verdict_reason
+# (display-only, open-ended vocabulary, never allowlisted -- see
+# references/gate-decision-table.md), price-action's CONFIRMED
+# verdict_reason feeds directly into `entry_trigger`, part of the
+# actionable READY_FOR_PLAN output -- so it IS allowlisted here.
+PRICE_ACTION_CONFIRMED_REASONS = frozenset(CHECK_REASON_TO_KEY)
 
 REQUIRED_REPORT_KEYS = ("symbol", "direction", "verdict", "confidence")
 
@@ -230,22 +244,48 @@ def _near_stale(age_days: int, max_age_days: int) -> bool:
     return (max_age_days - age_days) <= NEAR_STALE_WINDOW_DAYS
 
 
-def _resolve_stop_reference(raw_data: dict[str, Any]) -> float | None:
+def _valid_stop_reference(value: Any) -> float | None:
+    """A usable stop_reference: a finite, positive, non-bool number.
+    `isinstance(True, int)` is True in Python, so bool must be excluded
+    explicitly, or a boolean would silently pass as 0.0/1.0. Non-finite
+    values (inf/-inf/NaN -- all of which `json.loads` accepts as literal
+    tokens even though they aren't standard JSON) are rejected here too:
+    a non-finite stop_reference used to flow straight through to
+    READY_FOR_PLAN's `invalidation_level` and produce non-standard JSON
+    output (PR #249 user-review round 2, P1-B)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return float(value)
+
+
+def _resolve_stop_reference(raw_data: dict[str, Any]) -> tuple[float | None, str | None]:
     """handoff.price_action.stop_reference, falling back to top-level
-    swing_levels.stop_reference when handoff is absent (plan §3.1)."""
+    swing_levels.stop_reference when handoff provides no value at all
+    (plan §3.1). Returns (value, error): error is `None` on success,
+    `"missing"` when neither source provided any non-null value, or
+    `"invalid"` when a source provided an explicit but unusable value
+    (wrong type, bool, non-finite, zero, or negative) -- an explicit
+    garbage value is a real report bug and must not be silently masked
+    by falling through to the other source."""
     handoff = raw_data.get("handoff")
     if isinstance(handoff, dict):
         price_action = handoff.get("price_action")
         if isinstance(price_action, dict):
-            value = price_action.get("stop_reference")
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return float(value)
+            raw_value = price_action.get("stop_reference")
+            if raw_value is not None:
+                value = _valid_stop_reference(raw_value)
+                return (value, None) if value is not None else (None, "invalid")
+
     swing_levels = raw_data.get("swing_levels")
     if isinstance(swing_levels, dict):
-        value = swing_levels.get("stop_reference")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-    return None
+        raw_value = swing_levels.get("stop_reference")
+        if raw_value is not None:
+            value = _valid_stop_reference(raw_value)
+            return (value, None) if value is not None else (None, "invalid")
+
+    return None, "missing"
 
 
 def _build_entry_trigger(raw_data: dict[str, Any], verdict_reason: Any) -> str | None:
@@ -649,12 +689,48 @@ def _validated_report_input(
 
     state = verdict_to_state[verdict]
     if state == STATE_CONFIRMED and prefix == "price_action":
-        stop_reference = _resolve_stop_reference(raw_data)
-        if stop_reference is None:
+        # verdict_reason feeds entry_trigger, part of the actionable
+        # READY_FOR_PLAN output -- unlike the display-only fallback below
+        # (used for NOT_CONFIRMED/INSUFFICIENT and for news generally),
+        # it is validated type-first, then against TA's own contract
+        # (PR #249 user-review round 2, P1-A).
+        if not isinstance(verdict_reason, str) or not verdict_reason:
             return NormalizedInput(
                 kind=kind,
                 state=STATE_INVALID,
-                reason="price_action_missing_stop_reference",
+                reason="price_action_malformed",
+                verdict=verdict,
+                confidence=confidence,
+                as_of=as_of_value,
+                age_days=age_days,
+                warnings=tuple(warnings),
+                report_path=report_path,
+            )
+        if verdict_reason not in PRICE_ACTION_CONFIRMED_REASONS:
+            return NormalizedInput(
+                kind=kind,
+                state=STATE_INVALID,
+                reason="price_action_unknown_reason",
+                verdict=verdict,
+                confidence=confidence,
+                verdict_reason=verdict_reason,
+                as_of=as_of_value,
+                age_days=age_days,
+                warnings=tuple(warnings),
+                report_path=report_path,
+            )
+
+        stop_reference, stop_error = _resolve_stop_reference(raw_data)
+        if stop_error is not None:
+            reason = (
+                "price_action_missing_stop_reference"
+                if stop_error == "missing"
+                else "price_action_invalid_stop_reference"
+            )
+            return NormalizedInput(
+                kind=kind,
+                state=STATE_INVALID,
+                reason=reason,
                 verdict=verdict,
                 confidence=confidence,
                 verdict_reason=verdict_reason,
@@ -882,6 +958,21 @@ def build_gate_result(
         gate_confidence = _weakest_confidence(news.confidence, price.confidence)
         entry_trigger = price.entry_trigger
         invalidation_level = price.stop_reference
+        # Defensive invariant (PR #249 user-review round 2, P1-A/P1-B):
+        # normalize_price_action's CONFIRMED path is the actual enforcer
+        # -- it never returns CONFIRMED without a validated entry_trigger
+        # and a finite positive stop_reference -- but this assert exists
+        # as a second, independent guard against a future regression that
+        # could let READY_FOR_PLAN slip out without both being usable.
+        assert isinstance(entry_trigger, str) and entry_trigger, (
+            "invariant violated: READY_FOR_PLAN requires a non-empty entry_trigger"
+        )
+        assert (
+            isinstance(invalidation_level, (int, float))
+            and not isinstance(invalidation_level, bool)
+            and math.isfinite(invalidation_level)
+            and invalidation_level > 0
+        ), "invariant violated: READY_FOR_PLAN requires a finite, positive invalidation_level"
 
     warnings = list(extra_warnings)
     warnings.extend(crowding.warnings)

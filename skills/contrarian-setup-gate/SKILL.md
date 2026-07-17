@@ -100,8 +100,9 @@ Every input's `state` is one of `CONFIRMED`, `NOT_CONFIRMED`, `INSUFFICIENT`, `P
 
 1. **Never places or recommends orders.** `READY_FOR_PLAN` is the furthest state this skill reaches. Order entry and position sizing are separate, downstream decisions.
 2. **INSUFFICIENT_EVIDENCE and REJECTED never advance.** No warning, confidence, or partial input ever pushes the status past what the precedence rules allow.
-3. **Fail closed on every input, always.** An unreadable, malformed, stale, symbol-mismatched, or unknown-enum report is never treated as a pass -- it is named and blocks or downgrades the status.
-4. **Not investment advice.** `entry_trigger` and `invalidation_level` are factual echoes of the upstream price-action report, not recommendations.
+3. **Fail closed on every input, always.** An unreadable, malformed, stale, symbol-mismatched, or unknown-enum report is never treated as a pass -- it is named and blocks or downgrades the status. This includes the price-action report's `verdict_reason` (allowlisted against technical-analyst's actual confirming-signal vocabulary, not merely type-checked) and its `stop_reference` (must be a finite, positive number -- never non-finite, zero, negative, or a boolean).
+4. **`READY_FOR_PLAN` always carries a usable plan.** `entry_trigger` is guaranteed non-empty and `invalidation_level` is guaranteed a finite positive number whenever the status is `READY_FOR_PLAN` -- enforced both by input validation and by a defensive invariant check.
+5. **Not investment advice.** `entry_trigger` and `invalidation_level` are factual echoes of the upstream price-action report, not recommendations.
 
 ## Resources
 

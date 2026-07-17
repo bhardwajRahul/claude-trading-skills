@@ -64,6 +64,18 @@ def _crowding(label: str) -> gl.NormalizedInput:
 
 def _downstream(kind: str, label: str, prefix: str) -> gl.NormalizedInput:
     if label == "CONF":
+        if kind == gl.STEP_PRICE:
+            # A CONFIRMED price-action step must carry a validated
+            # entry_trigger and stop_reference -- build_gate_result's
+            # READY_FOR_PLAN invariant assert enforces this even for this
+            # status-transition-only matrix (PR #249 user-review round 2).
+            return gl.NormalizedInput(
+                kind=kind,
+                state=gl.STATE_CONFIRMED,
+                confidence="HIGH",
+                entry_trigger="price-action confirmation: key_reversal at week_of=2026-07-06",
+                stop_reference=1.372,
+            )
         return gl.NormalizedInput(kind=kind, state=gl.STATE_CONFIRMED, confidence="HIGH")
     if label == "NOT_CONF":
         return gl.NormalizedInput(
@@ -820,6 +832,154 @@ def test_normalize_price_action_confirmed_without_stop_reference_is_invalid() ->
     )
     assert result.state == gl.STATE_INVALID
     assert result.reason == "price_action_missing_stop_reference"
+
+
+# --- Section 6: PR #249 user-review round 2 (P1-A / P1-B) -------------------
+
+
+def test_normalize_price_action_confirmed_unknown_reason_p1_a_repro() -> None:
+    """THE USER'S P1-A REPRO: verdict_reason "BANANA" on a CONFIRMED
+    price-action report used to reach READY_FOR_PLAN with
+    entry_trigger="price-action confirmation: BANANA" instead of failing
+    closed against TA's actual verdict_reason contract."""
+    data = price_fixture(verdict="CONFIRMED", verdict_reason="BANANA")
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "price_action_unknown_reason"
+    assert result.entry_trigger is None
+
+
+def test_normalize_price_action_confirmed_missing_reason_p1_a_repro() -> None:
+    """THE USER'S P1-A REPRO (missing variant): a null verdict_reason on a
+    CONFIRMED report used to reach READY_FOR_PLAN with entry_trigger=null
+    instead of failing closed."""
+    data = price_fixture(verdict="CONFIRMED", verdict_reason=None)
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "price_action_malformed"
+
+
+def test_price_action_confirmed_reasons_matches_technical_analyst_source() -> None:
+    """Cross-skill consistency pin (PR #249 user-review round 2, P1-A): the
+    hardcoded allowlist in gate_logic.PRICE_ACTION_CONFIRMED_REASONS must
+    match technical-analyst's own weekly_price_action.CHECK_REASON_MAP
+    values exactly. If TA ever adds a new confirming-signal token, this
+    test fails loudly here instead of the gate silently rejecting every
+    real report carrying that new token as price_action_unknown_reason."""
+    import importlib.util
+
+    ta_module_path = (
+        Path(__file__).resolve().parents[3]
+        / "technical-analyst"
+        / "scripts"
+        / "weekly_price_action.py"
+    )
+    assert ta_module_path.exists(), f"technical-analyst module not found at {ta_module_path}"
+    spec = importlib.util.spec_from_file_location(
+        "weekly_price_action_for_gate_test", ta_module_path
+    )
+    ta_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ta_module)
+    assert set(ta_module.CHECK_REASON_MAP.values()) == gl.PRICE_ACTION_CONFIRMED_REASONS
+
+
+@pytest.mark.parametrize(
+    "bad_stop_reference",
+    [float("inf"), float("-inf"), float("nan"), True, 0, -1.5, "1.372", None],
+)
+def test_normalize_price_action_confirmed_invalid_stop_reference_p1_b_repro(
+    bad_stop_reference,
+) -> None:
+    """THE USER'S P1-B REPRO (and its variants): a non-finite, non-positive,
+    boolean, or wrong-typed stop_reference must never reach READY_FOR_PLAN's
+    invalidation_level. `None` is the pre-existing missing-value case
+    (kept here for a single parametrized sweep); everything else is a
+    value that was explicitly PROVIDED but is unusable."""
+    data = price_fixture(stop_reference=bad_stop_reference, include_handoff=False)
+    data["swing_levels"]["stop_reference"] = bad_stop_reference
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    if bad_stop_reference is None:
+        assert result.reason == "price_action_missing_stop_reference"
+    else:
+        assert result.reason == "price_action_invalid_stop_reference"
+
+
+def test_normalize_price_action_confirmed_valid_positive_stop_reference_control() -> None:
+    """Control for the P1-B parametrized sweep: a normal, finite, positive
+    stop_reference must still succeed."""
+    data = price_fixture(stop_reference=1.372)
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_CONFIRMED
+    assert result.stop_reference == 1.372
+
+
+def test_normalize_price_action_invalid_stop_reference_in_handoff_does_not_fall_back_to_swing_levels() -> (
+    None
+):
+    """An explicit garbage handoff.stop_reference is a real report bug and
+    must not be silently masked by a valid swing_levels fallback (v4
+    design decision, pinned)."""
+    data = price_fixture(stop_reference=1.372)  # valid swing_levels.stop_reference
+    data["handoff"]["price_action"]["stop_reference"] = float("inf")
+    result = gl.normalize_price_action(
+        data, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "price_action_invalid_stop_reference"
+
+
+def test_build_gate_result_ready_invariant_catches_a_bypassed_bad_entry_trigger() -> None:
+    """Defensive-invariant regression test: even if some future code path
+    bypassed normalize_price_action's validation and handed
+    build_gate_result a CONFIRMED price step with no entry_trigger, the
+    READY_FOR_PLAN invariant assert must catch it rather than silently
+    emitting an incomplete READY_FOR_PLAN."""
+    crowding = _crowding("CONF_S")
+    news = gl.NormalizedInput(kind=gl.STEP_NEWS, state=gl.STATE_CONFIRMED, confidence="HIGH")
+    price = gl.NormalizedInput(
+        kind=gl.STEP_PRICE, state=gl.STATE_CONFIRMED, confidence="HIGH", stop_reference=1.37
+    )  # entry_trigger deliberately omitted
+    with pytest.raises(AssertionError, match="entry_trigger"):
+        gl.build_gate_result(
+            symbol=SYMBOL,
+            crowding=crowding,
+            news=news,
+            price=price,
+            max_detector_age_days=10,
+            max_report_age_days=7,
+            as_of=AS_OF,
+        )
+
+
+def test_build_gate_result_ready_invariant_catches_a_bypassed_bad_stop_reference() -> None:
+    crowding = _crowding("CONF_S")
+    news = gl.NormalizedInput(kind=gl.STEP_NEWS, state=gl.STATE_CONFIRMED, confidence="HIGH")
+    price = gl.NormalizedInput(
+        kind=gl.STEP_PRICE,
+        state=gl.STATE_CONFIRMED,
+        confidence="HIGH",
+        entry_trigger="price-action confirmation: key_reversal",
+        stop_reference=float("inf"),
+    )
+    with pytest.raises(AssertionError, match="invalidation_level"):
+        gl.build_gate_result(
+            symbol=SYMBOL,
+            crowding=crowding,
+            news=news,
+            price=price,
+            max_detector_age_days=10,
+            max_report_age_days=7,
+            as_of=AS_OF,
+        )
 
 
 def test_normalize_price_action_not_confirmed() -> None:
