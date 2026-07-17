@@ -9,10 +9,16 @@ explicit, exhaustively-tested precedence state machine into one actionable
 `setup_status`.
 
 This module is PURE: no file I/O, no network, no environment reads. The CLI
-(`run_contrarian_setup_gate.py`) owns file loading (with 4-class hardening:
-unreadable / parse_error / malformed / stale) and report generation; it
-passes already-parsed JSON (or a `load_error` tag) into the `normalize_*`
-functions below.
+(`run_contrarian_setup_gate.py`) owns file loading -- unreadable /
+parse_error / non_finite are CLI-level `load_error` tags detected before
+this module ever sees the data (non_finite: PR #249 user-review round 3,
+a whole-file recursive scan for any non-finite float anywhere, closing off
+the only route by which a raw non-finite value could otherwise reach the
+CLI's `allow_nan=False` JSON writer via an audit-echo field) -- and passes
+either the parsed JSON or one of those tags into the `normalize_*`
+functions below, which detect the remaining classes (malformed / stale /
+symbol_mismatch / direction_mismatch / schema_unsupported / unknown_verdict
+/ unknown_confidence / unknown_reason / invalid_stop_reference) themselves.
 
 State machine precedence (plan Issue #241 §3.3, v4 -- SEQUENTIAL
 pipeline-order evaluation, PR #249 user-review P1-3):
@@ -338,6 +344,10 @@ def normalize_crowding(
         return NormalizedInput(
             kind=kind, state=STATE_INVALID, reason="detector_parse_error", report_path=report_path
         )
+    if load_error == "non_finite":
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason="detector_non_finite", report_path=report_path
+        )
     if not isinstance(raw_data, dict):
         return NormalizedInput(
             kind=kind, state=STATE_INVALID, reason="detector_malformed", report_path=report_path
@@ -489,6 +499,10 @@ def _normalize_downstream_report(
     if load_error == "parse_error":
         return NormalizedInput(
             kind=kind, state=STATE_INVALID, reason=f"{prefix}_parse_error", report_path=report_path
+        )
+    if load_error == "non_finite":
+        return NormalizedInput(
+            kind=kind, state=STATE_INVALID, reason=f"{prefix}_non_finite", report_path=report_path
         )
     if not isinstance(raw_data, dict):
         return NormalizedInput(

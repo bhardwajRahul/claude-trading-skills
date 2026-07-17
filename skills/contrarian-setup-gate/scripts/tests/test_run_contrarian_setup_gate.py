@@ -76,6 +76,70 @@ def test_load_json_file_valid_json_succeeds(tmp_path: Path) -> None:
     assert data == {"a": 1}
 
 
+# --- Section 1b: PR #249 user-review round 3 -- whole-file non-finite scan --
+
+
+def test_load_json_file_overflow_number_is_non_finite(tmp_path: Path) -> None:
+    """A syntactically valid JSON number that overflows to `inf` on parse
+    (THE USER'S REPRO shape: 1e309) must be caught here, before the data
+    ever reaches gate_logic."""
+    path = tmp_path / "overflow.json"
+    path.write_text('{"classification": 1e309}', encoding="utf-8")
+    data, reason = cli.load_json_file(str(path))
+    assert data is None
+    assert reason == "non_finite"
+
+
+def test_load_json_file_literal_infinity_is_non_finite(tmp_path: Path) -> None:
+    """A bare `Infinity` JSON literal (a non-standard extension json.loads
+    accepts by default) must also be caught."""
+    path = tmp_path / "infinity.json"
+    path.write_text('{"verdict": Infinity}', encoding="utf-8")
+    data, reason = cli.load_json_file(str(path))
+    assert data is None
+    assert reason == "non_finite"
+
+
+def test_load_json_file_negative_infinity_inside_a_list_is_non_finite(tmp_path: Path) -> None:
+    """A non-finite value nested inside a LIST (mirroring a `skipped[]`
+    entry) must be caught -- the scan is not top-level-keys-only."""
+    path = tmp_path / "neg_inf_in_list.json"
+    path.write_text('{"skipped": [{"symbol": "B6", "note": -Infinity}]}', encoding="utf-8")
+    data, reason = cli.load_json_file(str(path))
+    assert data is None
+    assert reason == "non_finite"
+
+
+def test_load_json_file_nan_literal_nested_deep_is_non_finite(tmp_path: Path) -> None:
+    """A NaN literal buried several levels deep (mirroring a nested
+    run_context field) must be caught -- the scan recurses to any depth."""
+    path = tmp_path / "nan_deep.json"
+    path.write_text('{"run_context": {"params": {"nested": {"value": NaN}}}}', encoding="utf-8")
+    data, reason = cli.load_json_file(str(path))
+    assert data is None
+    assert reason == "non_finite"
+
+
+def test_load_json_file_clean_file_with_ordinary_floats_is_unaffected(tmp_path: Path) -> None:
+    """Control: ordinary finite floats (including negative and
+    fractional) must never trip the non-finite scan."""
+    path = tmp_path / "clean.json"
+    path.write_text('{"stop_reference": 1.372, "net_position": -87903.0}', encoding="utf-8")
+    data, reason = cli.load_json_file(str(path))
+    assert reason is None
+    assert data == {"stop_reference": 1.372, "net_position": -87903.0}
+
+
+def test_contains_non_finite_directly() -> None:
+    assert cli._contains_non_finite(float("inf")) is True
+    assert cli._contains_non_finite(float("-inf")) is True
+    assert cli._contains_non_finite(float("nan")) is True
+    assert cli._contains_non_finite({"a": {"b": [1, 2, float("inf")]}}) is True
+    assert cli._contains_non_finite({"a": [1, 2, 3], "b": "text", "c": None, "d": True}) is False
+    assert cli._contains_non_finite(1.372) is False
+    assert cli._contains_non_finite(42) is False
+
+
 # --- Section 2: fixture builders (real-schema shapes) -----------------------
 
 
@@ -489,7 +553,11 @@ def test_cli_price_stop_reference_overflow_to_infinity_p1_b_repro(
     parse. This used to reach READY_FOR_PLAN with
     "invalidation_level": Infinity in the written file -- not valid
     standard JSON, and unusable as a stop level for a downstream
-    position-sizing skill."""
+    position-sizing skill. As of the round-3 fix, the CLI's whole-file
+    non-finite scan now catches this BEFORE gate_logic's stop_reference-
+    specific validation ever runs, so the reason is `price_action_non_finite`
+    (not `price_action_invalid_stop_reference`, which is still reachable
+    for finite-but-otherwise-bad values like 0, negative, or bool)."""
     detector_path = _write(tmp_path, "detector.json", _detector_fixture())
     news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
     price_data = _price_fixture(verdict="CONFIRMED")
@@ -519,14 +587,17 @@ def test_cli_price_stop_reference_overflow_to_infinity_p1_b_repro(
     result = json.loads(output_text)  # standard-JSON-compliant: no NaN/Infinity tokens to parse
     assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
     assert result["invalidation_level"] is None
-    assert result["missing_confirmations"][0]["reason"] == "price_action_invalid_stop_reference"
+    assert result["missing_confirmations"][0]["reason"] == "price_action_non_finite"
 
 
 def test_cli_price_stop_reference_nan_literal_p1_b_repro(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A bare `NaN` JSON literal (a non-standard extension `json.loads`
-    accepts by default) must also fail closed, not just numeric overflow."""
+    accepts by default) must also fail closed, not just numeric overflow.
+    As of the round-3 fix, this is caught by the CLI's whole-file scan
+    (`price_action_non_finite`) before gate_logic's own stop_reference
+    validation would otherwise have run."""
     detector_path = _write(tmp_path, "detector.json", _detector_fixture())
     news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
     price_data = _price_fixture(verdict="CONFIRMED")
@@ -552,14 +623,19 @@ def test_cli_price_stop_reference_nan_literal_p1_b_repro(
     assert exit_code == 0
     result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
     assert result["setup_status"] == "INSUFFICIENT_EVIDENCE"
-    assert result["missing_confirmations"][0]["reason"] == "price_action_invalid_stop_reference"
+    assert result["missing_confirmations"][0]["reason"] == "price_action_non_finite"
 
 
 def test_cli_price_stop_reference_bool_true_p1_b_repro(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`isinstance(True, int)` is True in Python -- a bare `true` JSON
-    literal for stop_reference must not silently pass as 1.0."""
+    literal for stop_reference must not silently pass as 1.0. Unlike the
+    overflow/NaN repros above, `bool` is never a `float`, so the CLI's
+    whole-file non-finite scan does not intercept it -- this still
+    reaches gate_logic's own `price_action_invalid_stop_reference` check,
+    confirming that check remains reachable for finite-but-wrong-typed
+    values after the round-3 fix."""
     detector_path = _write(tmp_path, "detector.json", _detector_fixture())
     news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
     price_data = _price_fixture(verdict="CONFIRMED")
@@ -600,6 +676,152 @@ def test_generate_json_report_allow_nan_false_raises_on_residual_non_finite_valu
     output_path = tmp_path / "bad.json"
     with pytest.raises(ValueError):
         cli.generate_json_report(bad_result, output_path)
+
+
+# --- Section 4: PR #249 user-review round 3 -- non-finite anywhere, end-to-end --
+
+
+def _assert_clean_non_finite_report(
+    tmp_path: Path, expected_status: str, expected_reason: str
+) -> None:
+    """Shared assertions for the (a)-(d) repros: exit 0, BOTH reports
+    written (JSON and MD), the expected status/reason, and no traceback
+    left in the JSON report's content (a crash would have produced no
+    file, or a partial one -- reading it back via json.loads is itself
+    proof the file is valid, complete JSON)."""
+    json_path = tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json"
+    md_path = tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.md"
+    assert json_path.exists(), "JSON report was not written -- the CLI must never partially fail"
+    assert md_path.exists(), "Markdown report was not written -- the CLI must never partially fail"
+    result = json.loads(json_path.read_text())  # raises if the file isn't valid, complete JSON
+    assert result["setup_status"] == expected_status
+    assert any(item["reason"] == expected_reason for item in result["missing_confirmations"])
+
+
+def test_cli_detector_classification_overflow_p1_round3_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(a) THE USER'S ROUND-3 REPRO: detector classification: 1e309.
+    Before this fix, normalization correctly marked crowding INVALID, but
+    then the raw `inf` value echoed into the audit block crashed the
+    writer's allow_nan=False -> exit 1, no/partial report."""
+    detector_data = _detector_fixture()
+    detector_data["markets"][0]["classification"] = 1e309
+    detector_path = tmp_path / "detector.json"
+    detector_path.write_text(json.dumps(detector_data), encoding="utf-8")
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        ["--symbol", SYMBOL, "--detector-json", str(detector_path), "--as-of", AS_OF],
+    )
+    assert exit_code == 0
+    _assert_clean_non_finite_report(tmp_path, "INSUFFICIENT_EVIDENCE", "detector_non_finite")
+
+
+def test_cli_news_verdict_overflow_p1_round3_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b) THE USER'S ROUND-3 REPRO variant: news verdict: 1e309."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_data = _news_fixture(verdict="CONFIRMED")
+    news_data["verdict"] = 1e309
+    news_path = tmp_path / "news.json"
+    news_path.write_text(json.dumps(news_data), encoding="utf-8")
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            str(news_path),
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    _assert_clean_non_finite_report(tmp_path, "INSUFFICIENT_EVIDENCE", "news_non_finite")
+
+
+def test_cli_nan_literal_nested_deep_in_run_context_p1_round3_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(c) A bare NaN literal nested deep inside run_context -- a field
+    the gate doesn't even read -- must still reject the whole file."""
+    detector_data = _detector_fixture()
+    detector_path = tmp_path / "detector.json"
+    raw_text = json.dumps(detector_data)
+    # Inject a deeply-nested NaN into run_context.params without disturbing
+    # the rest of the structure.
+    raw_text = raw_text.replace(
+        '"data_date": "2026-07-07"}',
+        '"data_date": "2026-07-07", "params": {"nested": {"value": NaN}}}',
+        1,
+    )
+    detector_path.write_text(raw_text, encoding="utf-8")
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        ["--symbol", SYMBOL, "--detector-json", str(detector_path), "--as-of", AS_OF],
+    )
+    assert exit_code == 0
+    _assert_clean_non_finite_report(tmp_path, "INSUFFICIENT_EVIDENCE", "detector_non_finite")
+
+
+def test_cli_negative_infinity_inside_skipped_entry_p1_round3_repro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(d) -Infinity inside a skipped[] entry -- again, a field the gate's
+    decision logic doesn't read for a symbol that IS present in
+    markets[] -- must still reject the whole file (whole-file scan, not
+    field-scoped)."""
+    detector_data = _detector_fixture()
+    detector_data["skipped"] = [{"symbol": "ZZ", "note": float("-inf")}]
+    detector_path = tmp_path / "detector.json"
+    # json.dumps (default allow_nan=True) renders float('-inf') as the
+    # bare `-Infinity` token, which json.loads reads back as -inf.
+    raw_text = json.dumps(detector_data)
+    assert "-Infinity" in raw_text
+    detector_path.write_text(raw_text, encoding="utf-8")
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        ["--symbol", SYMBOL, "--detector-json", str(detector_path), "--as-of", AS_OF],
+    )
+    assert exit_code == 0
+    _assert_clean_non_finite_report(tmp_path, "INSUFFICIENT_EVIDENCE", "detector_non_finite")
+
+
+def test_cli_clean_file_control_unaffected_by_non_finite_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(e) Control: an entirely ordinary, finite-numbers-only trio must
+    still reach READY_FOR_PLAN exactly as before -- the new scan must not
+    have any false-positive cost on legitimate reports."""
+    detector_path = _write(tmp_path, "detector.json", _detector_fixture())
+    news_path = _write(tmp_path, "news.json", _news_fixture(verdict="CONFIRMED"))
+    price_path = _write(tmp_path, "price.json", _price_fixture(verdict="CONFIRMED"))
+    exit_code = _run_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--symbol",
+            SYMBOL,
+            "--detector-json",
+            detector_path,
+            "--news-json",
+            news_path,
+            "--price-action-json",
+            price_path,
+            "--as-of",
+            AS_OF,
+        ],
+    )
+    assert exit_code == 0
+    result = json.loads((tmp_path / f"contrarian_setup_gate_{SYMBOL}_{AS_OF}.json").read_text())
+    assert result["setup_status"] == "READY_FOR_PLAN"
 
 
 def test_cli_format_json_only_skips_markdown(

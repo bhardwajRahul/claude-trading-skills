@@ -11,15 +11,21 @@ state machine in gate_logic.py.
 
 PURE and OFFLINE: no network, no API keys, no environment reads beyond the
 three local report files this CLI is pointed at. The CLI's own job is
-narrow: load the three JSON files with 4-class hardening (unreadable /
-parse_error / malformed / stale -- "malformed" and "stale" are detected
-inside gate_logic.normalize_*, which degrades a wrong-shaped or stale
-report to INVALID rather than crashing), call into gate_logic.py to
-normalize and synthesize, then write the JSON/Markdown report. It never
-crashes on a bad input file: every run exits 0 and writes a report, with
-the specific reason named in the failed input's `inputs.<step>.state` /
-`missing_confirmations` (identical fail-closed contract to every upstream
-skill in this pipeline).
+narrow: load the three JSON files with hardening -- unreadable / parse_error
+/ non_finite are caught here in `load_json_file` (non_finite: a whole-file
+recursive scan rejecting any non-finite float anywhere, even in a field the
+gate never reads -- PR #249 user-review round 3; this closes off the only
+route by which a raw non-finite value could otherwise reach the JSON
+writer's `allow_nan=False` via an audit-echo field and crash with exit 1
+on an entirely different code path than the one that determined the input
+was bad); malformed / stale / and the remaining field-level classes are
+detected inside gate_logic.normalize_*, which degrades a wrong-shaped or
+otherwise-invalid report to INVALID rather than crashing -- then call into
+gate_logic.py to normalize and synthesize, then write the JSON/Markdown
+report. It never crashes on a bad input file: every run exits 0 and writes
+a report, with the specific reason named in the failed input's
+`inputs.<step>.state` / `missing_confirmations` (identical fail-closed
+contract to every upstream skill in this pipeline).
 
 Output:
   - JSON: contrarian_setup_gate_<symbol>_<as-of>.json
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -40,11 +47,33 @@ import gate_logic
 SKILL_NAME = "contrarian-setup-gate"
 
 
+def _contains_non_finite(value: Any) -> bool:
+    """Recursively check whether a JSON-parsed structure contains any
+    non-finite float (`inf`, `-inf`, `nan`) ANYWHERE -- at any depth, in
+    any dict value or list item, regardless of whether that field is one
+    the gate actually reads. Catches both a syntactically valid JSON
+    number that overflows to `inf` on parse (e.g. `1e309` -- `math.isinf`
+    catches this even though no `parse_constant` hook ever sees it, since
+    the overflow happens inside `float()` itself, after the token has
+    already been recognized as an ordinary number) and the bare
+    `Infinity`/`-Infinity`/`NaN` literals `json.loads` accepts by default
+    as a non-standard extension (PR #249 user-review round 3)."""
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(_contains_non_finite(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_non_finite(item) for item in value)
+    return False
+
+
 def load_json_file(path: str) -> tuple[Any | None, str | None]:
     """Read and parse a JSON file. Returns (data, None) on success, or
     (None, reason) on failure, where `reason` is `"unreadable"` (missing,
-    permission-denied, a directory, or not valid UTF-8) or `"parse_error"`
-    (the file opened and decoded fine but isn't valid JSON).
+    permission-denied, a directory, or not valid UTF-8), `"parse_error"`
+    (the file opened and decoded fine but isn't valid JSON), or
+    `"non_finite"` (the file parsed as valid JSON, but contains a
+    non-finite float somewhere -- see `_contains_non_finite`).
 
     Modeled on technical-analyst's post-#247 hardened loader
     (skills/technical-analyst/scripts/check_weekly_price_action.py
@@ -58,20 +87,39 @@ def load_json_file(path: str) -> tuple[Any | None, str | None]:
     other unrelated exceptions are deliberately left uncaught -- those
     aren't "this input is bad" conditions.
 
+    The `non_finite` check runs BEFORE this data is handed to
+    gate_logic.normalize_* at all -- it is deliberately whole-file, not
+    field-scoped: gate_logic's normalize_* functions preserve some
+    raw-but-invalid values (e.g. an unknown `classification`) verbatim in
+    their `NormalizedInput` for audit transparency, and the CLI's JSON
+    writer uses `allow_nan=False` as a second, independent defense layer
+    -- a non-finite float that reached that echo path would otherwise
+    raise `ValueError` at write time and break the exit-0-always-writes-
+    a-report contract on an entirely different path than the one that
+    determined the input was bad (PR #249 user-review round 3: this
+    scenario was reproduced live -- `classification: 1e309` normalized
+    correctly to INVALID, but then crashed the CLI with exit 1 when the
+    raw `inf` value was echoed into the audit block and hit `allow_nan=
+    False`). Scanning the whole parsed structure up front, before
+    gate_logic ever sees it, closes that off structurally rather than
+    requiring every future echo site to remember to guard itself.
+
     Wrong-shape JSON (valid JSON, but not a dict / missing required keys /
-    wrong types) is NOT this function's concern -- that's the third and
-    fourth hardening classes, detected inside gate_logic.normalize_*,
-    which degrades to an INVALID state with a named `<input>_malformed`
-    reason rather than raising here.
+    wrong types) is NOT this function's concern -- that's detected inside
+    gate_logic.normalize_*, which degrades to an INVALID state with a
+    named `<input>_malformed` reason rather than raising here.
     """
     try:
         text = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return None, "unreadable"
     try:
-        return json.loads(text), None
+        data = json.loads(text)
     except json.JSONDecodeError:
         return None, "parse_error"
+    if _contains_non_finite(data):
+        return None, "non_finite"
+    return data, None
 
 
 def _as_of_type(value: str) -> str:

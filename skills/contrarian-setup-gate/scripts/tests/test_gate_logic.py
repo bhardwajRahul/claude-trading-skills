@@ -509,6 +509,15 @@ def test_normalize_crowding_load_error_parse_error() -> None:
     assert result.reason == "detector_parse_error"
 
 
+def test_normalize_crowding_load_error_non_finite() -> None:
+    """PR #249 user-review round 3: the CLI's whole-file non-finite scan
+    reports this as a load_error, exactly like unreadable/parse_error --
+    gate_logic never even sees the raw parsed data in this case."""
+    result = gl.normalize_crowding(None, "non_finite", symbol=SYMBOL, as_of=AS_OF, max_age_days=10)
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "detector_non_finite"
+
+
 @pytest.mark.parametrize("bad_shape", [["not", "a", "dict"], "a string", None, 42])
 def test_normalize_crowding_wrong_top_level_shape(bad_shape) -> None:
     result = gl.normalize_crowding(bad_shape, None, symbol=SYMBOL, as_of=AS_OF, max_age_days=10)
@@ -747,6 +756,14 @@ def test_normalize_news_load_error_unreadable() -> None:
     )
     assert result.state == gl.STATE_INVALID
     assert result.reason == "news_unreadable"
+
+
+def test_normalize_news_load_error_non_finite() -> None:
+    result = gl.normalize_news(
+        None, "non_finite", symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "news_non_finite"
 
 
 def price_fixture(
@@ -1078,6 +1095,14 @@ def test_normalize_price_action_load_error_parse_error() -> None:
     )
     assert result.state == gl.STATE_INVALID
     assert result.reason == "price_action_parse_error"
+
+
+def test_normalize_price_action_load_error_non_finite() -> None:
+    result = gl.normalize_price_action(
+        None, "non_finite", symbol=SYMBOL, as_of=AS_OF, max_age_days=7, detector=CONFIRMED_CROWDING
+    )
+    assert result.state == gl.STATE_INVALID
+    assert result.reason == "price_action_non_finite"
 
 
 def test_normalize_price_action_unknown_verdict() -> None:
