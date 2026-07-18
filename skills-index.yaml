@@ -1311,6 +1311,7 @@ skills:
   inputs:
   - screener_report
   - trade_actions
+  - futures_position_size
   outputs:
   - thesis_record
   - journal_entry
