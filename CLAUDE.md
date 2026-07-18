@@ -595,6 +595,15 @@ python3 skills/trader-memory-core/scripts/trader_memory_cli.py store --state-dir
 python3 skills/trader-memory-core/scripts/trader_memory_cli.py store --state-dir state/theses/ \
   close <id> --exit-reason target_hit --actual-price 165.00 --actual-date 2026-06-01
 
+# Futures thesis: attach a futures-position-sizer SIZED report (contracts/
+# multiplier/direction), then trim/close with --contracts-sold instead of
+# --shares-sold — close/terminate/trim/open-position dispatch automatically
+# on position.asset_type.
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py store --state-dir state/theses/ \
+  attach-futures-position <id> --report reports/futures_position_es_2026-05-10.json
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py store --state-dir state/theses/ \
+  trim <id> --contracts-sold 1 --price 4950.00 --date 2026-05-12
+
 # Query theses
 python3 skills/trader-memory-core/scripts/trader_memory_cli.py store \
   --state-dir state/theses/ list --ticker AAPL --status ACTIVE
