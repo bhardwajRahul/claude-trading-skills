@@ -208,6 +208,7 @@ These are validated under `--strict-workflows`:
 | Every `required_skills` entry appears in at least one non-optional step | `WF009` |
 | Every non-optional `step.skill` appears in `required_skills` | `WF010` |
 | Workflow file referenced by an index entry's `workflows:` exists | `WF001` |
+| Required artifact produced before the final step is not consumed by any later step | `WF013` |
 
 ### 2.3 `consumes:` semantics — "use if available", not "required input"
 
@@ -393,6 +394,7 @@ python3 scripts/validate_skills_index.py --strict-metadata
 | `WF010` | Non-optional step `skill` missing from `required_skills` |
 | `WF011` | `required_skills` / `optional_skills` entry not in `skills-index.yaml` |
 | `WF012` | `artifacts[].produced_by_step` does not match the corresponding step's `produces` (either direction) |
+| `WF013` | Required artifact produced before the final step is not consumed by any later step |
 
 ### Skillset-level (`scripts/validate_skillsets.py`, always strict)
 
