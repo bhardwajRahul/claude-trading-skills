@@ -1336,6 +1336,29 @@
       ]
     },
     {
+      "api_profile": "mixed",
+      "cadence": "weekly",
+      "difficulty": "intermediate",
+      "display_name": "Kanchi Dividend Weekly",
+      "estimated_minutes": 60,
+      "id": "kanchi-dividend-weekly",
+      "optional_skills": [
+        "value-dividend-screener",
+        "dividend-growth-pullback-screener",
+        "kanchi-dividend-us-tax-accounting",
+        "kanchi-dividend-review-monitor"
+      ],
+      "prerequisite_workflows": [],
+      "required_skills": [
+        "kanchi-dividend-sop",
+        "trader-memory-core"
+      ],
+      "target_users": [
+        "long-term-investor",
+        "dividend-investor"
+      ]
+    },
+    {
       "api_profile": "no-api-basic",
       "cadence": "daily",
       "difficulty": "beginner",

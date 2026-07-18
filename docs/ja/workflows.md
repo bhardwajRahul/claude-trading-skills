@@ -23,6 +23,7 @@ permalink: /ja/workflows/
 | ワークフロー | 頻度 | 目安(分) | API プロファイル | 難易度 |
 |---|---|---|---|---|
 | [`core-portfolio-weekly`](#core-portfolio-weekly) — Core Portfolio Weekly | weekly | 60 | mixed | beginner |
+| [`kanchi-dividend-weekly`](#kanchi-dividend-weekly) — Kanchi Dividend Weekly | weekly | 60 | mixed | intermediate |
 | [`market-regime-daily`](#market-regime-daily) — Market Regime Daily | daily | 15 | no-api-basic | beginner |
 | [`monthly-performance-review`](#monthly-performance-review) — Monthly Performance Review | monthly | 90 | no-api-basic | intermediate |
 | [`multi-asset-opportunity-daily`](#multi-asset-opportunity-daily) — Multi-Asset Opportunity Daily | daily | 45 | mixed | intermediate |
@@ -90,6 +91,74 @@ permalink: /ja/workflows/
 - Confirm holdings snapshot reflects the actual brokerage state (Alpaca or CSV).
 - Confirm rebalance actions are entered manually at the broker, not auto-executed.
 - If dividend_review_findings flags T1-T5 issues, defer additional buys until resolved.
+
+**Journal 出力先:** `trader-memory-core`
+
+---
+
+## Kanchi Dividend Weekly {#kanchi-dividend-weekly}
+
+**`kanchi-dividend-weekly`** · weekly · ~60 min · mixed · intermediate
+
+**実行タイミング:** Weekly, to source and underwrite new US-listed dividend candidates using Kanchi's 5-step method: screen for yield/quality, deep-dive the strongest names, and register a fully-documented candidate thesis before any entry. v1 covers US-listed dividend stocks only.
+
+**実行してはいけないとき:** Not for Japanese or other non-US-listed dividend stocks -- this workflow neither covers nor implies support for them in v1. Not a claim that Kanchi-style screening is a profitable strategy; it is a disciplined candidate-sourcing routine, not a signal to buy. Not for maintaining an existing holding -- that is core-portfolio-weekly's job (this workflow is for finding and underwriting NEW candidates). No order is ever placed automatically; every buy is entered manually at the broker.
+
+**必須スキル:** `kanchi-dividend-sop`, `trader-memory-core`
+
+**任意スキル:** `value-dividend-screener`, `dividend-growth-pullback-screener`, `kanchi-dividend-us-tax-accounting`, `kanchi-dividend-review-monitor`
+
+**artifact 一覧:**
+
+| Artifact | 生成ステップ | 必須 | 下流ヒント |
+|---|---|---|---|
+| `high_yield_candidates` | 1 | なし | — |
+| `pullback_candidates` | 2 | なし | — |
+| `kanchi_candidates` | 3 | あり | — |
+| `stock_memo` | 3 | あり | — |
+| `account_location_advice` | 4 | なし | — |
+| `review_queue` | 5 | なし | — |
+| `kanchi_thesis_entry` | 6 | あり | `trade-memory-loop`, `monthly-performance-review` |
+
+**ステップ:**
+
+**ステップ 1: Screen for high-yield candidates** （任意） → `value-dividend-screener`
+
+- produces: `high_yield_candidates`
+
+**ステップ 2: Screen for dividend-growth pullbacks** （任意） → `dividend-growth-pullback-screener`
+
+- produces: `pullback_candidates`
+
+**ステップ 3: Run the Kanchi 5-step underwriting** （判断ゲート） → `kanchi-dividend-sop`
+
+- consumes: `high_yield_candidates`, `pullback_candidates`
+- produces: `kanchi_candidates`, `stock_memo`
+- **判断:** For each candidate, does the Kanchi verdict reach an actionable tier (CLEAN-PASS / PASS-CAUTION / CONDITIONAL-PASS)? A HOLD-REVIEW, STEP1-RECHECK, or FAIL verdict is fail-closed -- it stops here, not forward to sizing or registration. Candidates may come from step 1/2 screeners (use if available) or a manually supplied ticker list -- neither screener is required to run this step.
+
+**ステップ 4: Check US tax and account-location treatment** （任意） → `kanchi-dividend-us-tax-accounting`
+
+- produces: `account_location_advice`
+
+**ステップ 5: Check existing-holding review triggers** （任意） → `kanchi-dividend-review-monitor`
+
+- produces: `review_queue`
+
+**ステップ 6: Register the candidate thesis** （判断ゲート） → `trader-memory-core`
+
+- consumes: `kanchi_candidates`, `account_location_advice`, `review_queue`
+- produces: `kanchi_thesis_entry`
+- **判断:** For each actionable candidate, register the thesis with the Kanchi verdict, stock memo, and (if available) tax/account-location advice and any review-monitor flags. Confirm no unresolved blockers, sizing, sector concentration, and tranche plan before entering an order. Never transition the thesis to ACTIVE until a real broker fill happens -- this step only reaches IDEA / ENTRY_READY.
+
+**手動レビュー:**
+
+- A HOLD-REVIEW, STEP1-RECHECK, or FAIL Kanchi verdict is fail-closed -- it never advances to sizing or thesis registration.
+- No order is ever placed automatically, and the thesis never auto-transitions to ACTIVE; every fill is entered manually at the broker, then recorded with open-position.
+- Screeners (steps 1-2) are optional -- a manually supplied ticker list is an equally valid path into step 3.
+- Tax and account-location advice (step 4) is advisory, not authoritative -- verify with a tax professional or the actual broker/custodian statements before acting on it.
+- If review-monitor (step 5) flags an existing holding WARN or REVIEW, that only pauses additional buys in that name -- it never triggers an automatic sell.
+- Screener outputs land under each skill's own `logs/` directory, not a shared `reports/` path; treat artifact ids as logical references, not literal filenames, when wiring steps together.
+- Command examples for dividend-growth-pullback-screener must use `screen_dividend_growth_rsi.py` -- `screen_dividend_growth.py` does not exist in this repository.
 
 **Journal 出力先:** `trader-memory-core`
 
