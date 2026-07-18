@@ -24,7 +24,7 @@ Usage guides for whole multi-skill workflows, not individual skills. Each playbo
 | [PEAD (Post-Earnings Announcement Drift)]({{ '/en/playbooks/pead/' | relative_url }}) | 2-6 weeks | Earnings-drift entries from `pead-screener`'s red-candle pullback pattern |
 | [Shapiro COT Contrarian]({{ '/en/playbooks/shapiro-contrarian/' | relative_url }}) | Weekly | Fading crowded CFTC futures positioning after two independent confirmations |
 
-Each playbook is a **decision-support pipeline, not an auto-execution system**. Every order is placed manually; every screener output is a candidate list, not a signal to trade blindly. None of the eight skills behind these four playbooks (`stockbee-momentum-burst-screener`, `pead-screener`, `earnings-trade-analyzer`, `technical-analyst`, `position-sizer`, `trader-memory-core`, `pre-trade-discipline-gate`, `cot-contrarian-detector` and its Shapiro-pipeline peers) places orders, cancels orders, calls a broker API, or runs a realtime monitor.
+Each playbook is a **decision-support pipeline, not an auto-execution system**. Every order is placed manually; every screener output is a candidate list, not a signal to trade blindly. None of the skills behind these playbooks (`stockbee-momentum-burst-screener`, `pead-screener`, `earnings-trade-analyzer`, `technical-analyst`, `position-sizer`, `trader-memory-core`, `pre-trade-discipline-gate`, `cot-contrarian-detector` and its Shapiro-pipeline peers) places orders, cancels orders, calls a broker API, or runs a realtime monitor.
 
 ## Don't confuse the two short-horizon playbooks
 

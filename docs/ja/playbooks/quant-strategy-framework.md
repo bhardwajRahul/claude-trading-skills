@@ -72,11 +72,11 @@ permalink: /ja/playbooks/quant-strategy-framework/
 | 6. 織り込み状況 | `PolymarketClient`, `NewsClient`, FMP コンセンサス vs 自分の見立て | ギャップ = （自分の見立て − コンセンサス）× 反応関数 |
 | 7. 仮説カード | `trade-hypothesis-ideator` → `trader-memory-core` IDEA → ENTRY_READY | Thesis + キル基準 + Rターゲット + タイムストップ |
 | 8. サイジング | `position-sizer`（ストップロス基準または Kelly） | 株数 + ドルリスク |
-| 9. ポートフォリオ確認 | `exposure-coach` | セクター上限、ブレドス・ポスチャー、エクスポージャー上限% |
+| 9. ポートフォリオ確認 | `exposure-coach` | セクター上限、市場の幅のポスチャー、エクスポージャー上限% |
 
 ### DURING
 
-- **毎朝:** `market-regime-daily` ワークフロー（ブレドス + アップトレンド + エクスポージャー）を実行。総合スコアが1段階下がったら、ストップを詰めて新規エントリーは見送る。
+- **毎朝:** `market-regime-daily` ワークフロー（市場の幅 + アップトレンド + エクスポージャー）を実行。総合スコアが1段階下がったら、ストップを詰めて新規エントリーは見送る。
 - **ニュース監視:** `NewsClient.get_market_news(tickers=[...], days=1)` — thesis を壊すヘッドラインが無いか確認。
 - **PEAD 銘柄:** SIGNAL_READY → BREAKOUT の遷移を監視。
 - **保有中の決算跨ぎ:** 決算が thesis そのものでない限り、発表前にポジションを1/3に減らすかクローズする。
@@ -209,7 +209,7 @@ permalink: /ja/playbooks/quant-strategy-framework/
 
 ### DURING
 
-- 日次のブレドスチェック（`market-breadth-analyzer`）— ブレドスが縮小し始めると真っ先に崩れるのがテーマ株
+- 日次の市場の幅チェック（`market-breadth-analyzer`）— 市場の幅が縮小し始めると真っ先に崩れるのがテーマ株
 - テーマライフサイクルのドリフト監視: **Exhausting に入ってから** ではなく、**入る前に**手仕舞う
 
 ### POST

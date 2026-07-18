@@ -24,7 +24,7 @@ permalink: /ja/playbooks/
 | [PEAD（決算後ドリフト）]({{ '/ja/playbooks/pead/' | relative_url }}) | 2〜6週間 | `pead-screener` の赤週足プルバックパターンによる決算ドリフトエントリー |
 | [Shapiro COT 逆張り]({{ '/ja/playbooks/shapiro-contrarian/' | relative_url }}) | 週次 | 2つの独立確認を経てCFTC先物の混雑ポジショニングをフェードする |
 
-各プレイブックは**判断支援のパイプラインであり、自動発注システムではありません**。発注はすべて手動で行い、各スクリーナーの出力は無条件に従うシグナルではなく候補リストです。この4つのプレイブックを支える8つのスキル（`stockbee-momentum-burst-screener`、`pead-screener`、`earnings-trade-analyzer`、`technical-analyst`、`position-sizer`、`trader-memory-core`、`pre-trade-discipline-gate`、`cot-contrarian-detector` および Shapiro パイプラインの周辺スキル）のいずれも、発注・注文キャンセル・ブローカーAPI呼び出し・リアルタイム監視は行いません。
+各プレイブックは**判断支援のパイプラインであり、自動発注システムではありません**。発注はすべて手動で行い、各スクリーナーの出力は無条件に従うシグナルではなく候補リストです。これらのプレイブックを支えるスキル（`stockbee-momentum-burst-screener`、`pead-screener`、`earnings-trade-analyzer`、`technical-analyst`、`position-sizer`、`trader-memory-core`、`pre-trade-discipline-gate`、`cot-contrarian-detector` および Shapiro パイプラインの周辺スキル）のいずれも、発注・注文キャンセル・ブローカーAPI呼び出し・リアルタイム監視は行いません。
 
 ## 2つの短期プレイブックを混同しない
 

@@ -18,7 +18,7 @@ A usage guide for the whole momentum-burst workflow, not for `stockbee-momentum-
 
 ## The idea in one paragraph
 
-Stockbee-style Momentum Burst looks for a short, sharp price-and-volume burst breaking out of a range-contracted base — a 4% breakout, a dollar breakout, or a range expansion, on volume above the prior day and above a liquidity floor. This is a **2-5 session swing**, not a long-term trend trade and not a PEAD earnings-drift trade. The screener is a candidate-generation and setup-quality tool, not a signal service: a bare 4% move is never enough by itself, survivors still need a chart check, and only actual broker fills — never planned entries — become `ACTIVE` in trade memory.
+Stockbee-style Momentum Burst looks for a short, sharp price-and-volume burst breaking out of a range-contracted base — a 4% breakout, a dollar breakout, or a range expansion, always above a liquidity floor. Volume above the prior day is also required for the 4% breakout and the range expansion; the dollar breakout needs only the liquidity floor, not volume expansion. This is a **2-5 session swing**, not a long-term trend trade and not a PEAD earnings-drift trade. The screener is a candidate-generation and setup-quality tool, not a signal service: a bare 4% move is never enough by itself, survivors still need a chart check, and only actual broker fills — never planned entries — become `ACTIVE` in trade memory.
 
 ---
 
@@ -72,13 +72,13 @@ Run `market-regime-daily` (or at minimum `drawdown-circuit-breaker`) before scre
 ### Step 2 — Screen for Momentum Burst candidates
 
 ```bash
-# Mode A: FMP universe scan (requires FMP_API_KEY)
+# Mode A: FMP universe scan (requires FMP_API_KEY for historical prices)
 python3 skills/stockbee-momentum-burst-screener/scripts/screen_momentum_burst.py \
   --fmp-universe --max-symbols 300 \
   --market-gate allowed \
   --output-dir reports/
 
-# Mode B: explicit symbols
+# Mode B: explicit symbols (requires FMP_API_KEY for historical prices)
 python3 skills/stockbee-momentum-burst-screener/scripts/screen_momentum_burst.py \
   --symbols ZBRK NVDA SMCI \
   --market-gate allowed \
@@ -91,15 +91,17 @@ python3 skills/stockbee-momentum-burst-screener/scripts/screen_momentum_burst.py
   --output-dir reports/
 ```
 
+Modes A and B both build an `FMPClient` before screening and need `FMP_API_KEY`; only Mode C (`--prices-json`) is fully offline.
+
 Produces `stockbee_momentum_burst_<timestamp>.json`. Each candidate lands in one of five `state` values, driven by `setup_score` and the `--market-gate` you passed:
 
 | State | Condition | Typical rating |
 |---|---|---|
 | `ACTIONABLE_DAY1` | score ≥ 80, market gate not restrictive | A / A- |
 | `MANUAL_REVIEW` | 70 ≤ score < 80, market gate not restrictive | B |
-| `MANUAL_REVIEW_ONLY` | score ≥ 70 **and** `--market-gate restrictive` | A- / B |
+| `MANUAL_REVIEW_ONLY` | score ≥ 70 **and** `--market-gate restrictive` | A / A- / B |
 | `WATCH_ONLY` | 55 ≤ score < 70 | Watch |
-| `REJECTED` | score < 55, or a hard reject (below min price/volume, no trigger tag, insufficient history) | Reject |
+| `REJECTED` | score < 55, or a hard reject (below min price/volume, no trigger tag, insufficient history, `entry_reference <= stop_reference`, or risk-to-stop wider than `--max-risk-pct-to-stop`) | Reject |
 
 `MANUAL_REVIEW_ONLY` is a distinct fifth state, not a synonym for `MANUAL_REVIEW` — it exists so that a high-scoring candidate never becomes auto-actionable while the broader market gate itself is restrictive. Treat it the same as `MANUAL_REVIEW` for sizing purposes: a full manual chart review is required either way, nothing here is ever auto-actionable.
 
@@ -242,7 +244,7 @@ Both playbooks screen liquid US stocks for swing entries out of `trader-memory-c
 | Catalyst | Price/volume breakout — no earnings requirement | An actual earnings gap-up, confirmed by hand |
 | Entry pattern | 4% breakout / dollar breakout / range expansion off a tight base | Green weekly close above a red weekly candle's high |
 | Hold | 2-5 sessions | 2-6 weeks |
-| `thesis_type` | `growth_momentum` (shared with CANSLIM) | `earnings_drift` (dedicated adapter) |
+| `thesis_type` | `growth_momentum` (shared with CANSLIM) | `earnings_drift` (shared type; dedicated `pead-screener` adapter) |
 | Ingest path | `--source manual`, no dedicated adapter | `--source pead-screener`, dedicated fail-closed adapter |
 | Stop reference | Trigger-day low | Red weekly candle's low |
 
@@ -252,7 +254,7 @@ Stockbee's Episodic Pivot classifier (`analyze_ep.py`) sits upstream of both: it
 
 ## Related
 
-- No `workflows/*.yaml` manifest exists yet for this pipeline, so Trading Skills Navigator routing is out of scope until one is added.
+- No *dedicated* `workflows/*.yaml` manifest exists for this exact playbook. `stockbee-momentum-burst-screener` already appears in the broader [`stockbee-ep-daily`](https://github.com/tradermonty/claude-trading-skills/blob/main/workflows/stockbee-ep-daily.yaml) and [`swing-opportunity-daily`](https://github.com/tradermonty/claude-trading-skills/blob/main/workflows/swing-opportunity-daily.yaml) workflows, but there is no standalone Momentum Burst flow — Trading Skills Navigator routing to a dedicated flow is out of scope until one is added.
 - Skill reference: [Stockbee Momentum Burst Screener]({{ '/en/skills/stockbee-momentum-burst-screener/' | relative_url }})
 - The skills used: `stockbee-momentum-burst-screener`, `technical-analyst`, `position-sizer`, `trader-memory-core`, `pre-trade-discipline-gate`
 - See also: [PEAD Playbook]({{ '/en/playbooks/pead/' | relative_url }})
