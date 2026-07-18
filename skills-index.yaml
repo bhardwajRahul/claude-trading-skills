@@ -172,7 +172,8 @@ skills:
   outputs:
   - pullback_candidates
   - yield_growth_metrics
-  workflows: []
+  workflows:
+  - kanchi-dividend-weekly
 - id: downtrend-duration-analyzer
   display_name: Downtrend Duration Analyzer
   category: market-regime
@@ -568,6 +569,7 @@ skills:
   - review_queue
   workflows:
   - core-portfolio-weekly
+  - kanchi-dividend-weekly
 - id: kanchi-dividend-sop
   display_name: Kanchi Dividend SOP
   category: core-portfolio
@@ -586,7 +588,8 @@ skills:
   outputs:
   - kanchi_candidates
   - stock_memo
-  workflows: []
+  workflows:
+  - kanchi-dividend-weekly
 - id: kanchi-dividend-us-tax-accounting
   display_name: Kanchi Dividend US Tax Accounting
   category: core-portfolio
@@ -607,6 +610,7 @@ skills:
   - account_location_advice
   workflows:
   - core-portfolio-weekly
+  - kanchi-dividend-weekly
 - id: macro-regime-detector
   display_name: Macro Regime Detector
   category: market-regime
@@ -1326,6 +1330,7 @@ skills:
   - trade-memory-loop
   - monthly-performance-review
   - shapiro-contrarian
+  - kanchi-dividend-weekly
 - id: trading-skills-navigator
   display_name: Trading Skills Navigator
   category: meta
@@ -1430,6 +1435,7 @@ skills:
   - high_yield_candidates
   workflows:
   - core-portfolio-weekly
+  - kanchi-dividend-weekly
 - id: vcp-screener
   display_name: VCP Screener
   category: swing-opportunity

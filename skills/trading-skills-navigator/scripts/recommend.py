@@ -532,6 +532,41 @@ PERSONAS: tuple[Persona, ...] = (
             "short-term trading risk — regime layer governs the satellite sleeve"
         ),
     ),
+    # Kanchi-style dividend candidate sourcing (Issue #260) — MUST stay
+    # before dividend-long-term-investor (first-match-wins): that persona's
+    # broad "dividend"/"yield"/"配当" terms would otherwise swallow these
+    # queries and route to core-portfolio-weekly (holdings maintenance, not
+    # candidate sourcing). Every any_term here is deliberately narrow/
+    # specific — dry-run-checked against the full test_recommend.py string
+    # corpus (see test_kanchi_persona_terms_do_not_collide_with_corpus) so
+    # it can never appear as a substring of an existing pinned query (e.g.
+    # CONTRACT Q4's "dividend candidates" or Q6's "dividend stocks" — hence
+    # no bare "dividend candidate" or "dividend stocks" term below).
+    Persona(
+        name="kanchi-dividend-investor",
+        any_terms=(
+            "kanchi",
+            "kanchi dividend",
+            "kanchi high-dividend",
+            "high-yield dividend stocks",
+            "high-yield dividend screen",
+            "underwrite dividend",
+            # JA
+            "かんち",
+            "かんち式",
+            "かんちさん",
+            "高配当株スクリーニング",
+            "高配当株を探",
+            "配当株スクリーニング",
+        ),
+        primary="kanchi-dividend-weekly",
+        rationale=(
+            "Kanchi-style dividend investor — weekly US dividend candidate "
+            "sourcing and underwriting (screen, 5-step deep dive, thesis "
+            "registration), distinct from core-portfolio-weekly's existing-"
+            "holdings maintenance"
+        ),
+    ),
     # Q4 + Q6 — dividend / long-term core portfolio.
     Persona(
         name="dividend-long-term-investor",

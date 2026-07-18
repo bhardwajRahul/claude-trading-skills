@@ -798,6 +798,7 @@ These skills fetch future events via FMP API:
 | [`trade-memory-loop`](workflows/trade-memory-loop.yaml) | per closed trade | trader-memory-core, signal-postmortem |
 | [`monthly-performance-review`](workflows/monthly-performance-review.yaml) | monthly | trader-memory-core, signal-postmortem |
 | [`shapiro-contrarian`](workflows/shapiro-contrarian.yaml) | weekly | cot-contrarian-detector, news-reaction-failure-analyzer, technical-analyst, contrarian-setup-gate, futures-position-sizer, trader-memory-core |
+| [`kanchi-dividend-weekly`](workflows/kanchi-dividend-weekly.yaml) | weekly | kanchi-dividend-sop, trader-memory-core |
 
 ### Quickstart prose examples (NOT canonical)
 
