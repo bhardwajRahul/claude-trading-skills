@@ -48,21 +48,12 @@ class TestTierRank:
         assert fetch_calendar._tier_rank(1) == 1
         assert fetch_calendar._tier_rank(3) == 3
 
-    def test_numeric_string_parses(self):
-        assert fetch_calendar._tier_rank("2") == 2
-
-    def test_non_numeric_string_falls_back_to_99(self):
-        assert fetch_calendar._tier_rank("HIGH") == 99
-
-    def test_none_falls_back_to_99(self):
-        assert fetch_calendar._tier_rank(None) == 99
-
-    def test_bool_falls_back_to_99(self):
-        # bool is a subclass of int; treated as invalid input, not a tier value.
-        assert fetch_calendar._tier_rank(True) == 99
-
-    def test_arbitrary_object_falls_back_to_99(self):
-        assert fetch_calendar._tier_rank(object()) == 99
+    @pytest.mark.parametrize(
+        "value",
+        [0, -1, 4, 99, True, "2", "HIGH", None],
+    )
+    def test_only_api_contract_tiers_are_accepted(self, value):
+        assert fetch_calendar._tier_rank(value) is None
 
 
 # ---------------------------------------------------------------------------
@@ -94,27 +85,25 @@ class TestFetchCalendar:
         result = fetch_calendar.fetch_calendar("usd", 50, 1)
         assert [e["market_tier"] for e in result["events"]] == [1]
 
-    def test_non_int_tier_guard_does_not_raise_and_is_excluded(self, monkeypatch):
-        # Regression: market_tier of "HIGH" / None / "weird" must not raise ValueError
-        # (the old `int(x or 99)` implementation would crash on non-numeric strings).
-        payload = {"data": _events(["HIGH", None, "weird", "2", 1])}
+    @pytest.mark.parametrize("tier", [0, -1, 4, 99, True, "2", "HIGH", None])
+    def test_out_of_contract_tier_fails_closed(self, monkeypatch, tier):
+        payload = {"data": _events([tier])}
         monkeypatch.setattr(
             fetch_calendar.urllib.request, "urlopen", lambda *a, **k: _FakeResponse(payload)
         )
-        result = fetch_calendar.fetch_calendar("usd", 50, 1)
-        # Only tiers ranked <= 1 survive: "HIGH"/None/"weird" -> 99 (excluded),
-        # "2" -> 2 (excluded), 1 -> 1 (included).
-        tiers = [e["market_tier"] for e in result["events"]]
-        assert tiers == [1]
 
-    def test_numeric_string_tier_parses_and_is_comparable(self, monkeypatch):
-        payload = {"data": _events(["2", 1])}
-        monkeypatch.setattr(
-            fetch_calendar.urllib.request, "urlopen", lambda *a, **k: _FakeResponse(payload)
-        )
-        result = fetch_calendar.fetch_calendar("usd", 50, 2)
-        tiers = [e["market_tier"] for e in result["events"]]
-        assert tiers == ["2", 1]
+        with pytest.raises(RuntimeError, match="invalid market_tier"):
+            fetch_calendar.fetch_calendar("usd", 50, 3)
+
+    def test_invalid_min_tier_fails_before_request(self, monkeypatch):
+        def unexpected_urlopen(*args, **kwargs):
+            pytest.fail("urlopen must not run for an invalid min_tier")
+
+        monkeypatch.setattr(fetch_calendar.urllib.request, "urlopen", unexpected_urlopen)
+
+        for min_tier in (0, -1, 4, 99, True):
+            with pytest.raises(RuntimeError, match="min_tier must be one of"):
+                fetch_calendar.fetch_calendar("usd", 50, min_tier)
 
     def test_limit_clamped_above_100(self, monkeypatch):
         payload = {"data": _events([1] * 150)}
@@ -132,32 +121,99 @@ class TestFetchCalendar:
         result = fetch_calendar.fetch_calendar("usd", 0, None)
         assert len(result["events"]) == 1
 
-    def test_malformed_payload_not_dict_returns_empty_events(self, monkeypatch):
+    def test_valid_empty_data_returns_empty_events(self, monkeypatch):
+        monkeypatch.setattr(
+            fetch_calendar.urllib.request,
+            "urlopen",
+            lambda *a, **k: _FakeResponse({"data": []}),
+        )
+        result = fetch_calendar.fetch_calendar("usd", 50, 1)
+        assert result["events"] == []
+
+    def test_malformed_payload_not_dict_fails_closed(self, monkeypatch):
         monkeypatch.setattr(
             fetch_calendar.urllib.request,
             "urlopen",
             lambda *a, **k: _FakeResponse(["not", "a", "dict"]),
         )
-        result = fetch_calendar.fetch_calendar("usd", 50, 1)
-        assert result["events"] == []
 
-    def test_malformed_payload_data_not_list_returns_empty_events(self, monkeypatch):
+        with pytest.raises(RuntimeError, match="top-level JSON must be an object"):
+            fetch_calendar.fetch_calendar("usd", 50, 1)
+
+    def test_missing_data_fails_closed(self, monkeypatch):
+        monkeypatch.setattr(
+            fetch_calendar.urllib.request,
+            "urlopen",
+            lambda *a, **k: _FakeResponse({"currency": "USD"}),
+        )
+
+        with pytest.raises(RuntimeError, match="missing required data field"):
+            fetch_calendar.fetch_calendar("usd", 50, 1)
+
+    def test_malformed_payload_data_not_list_fails_closed(self, monkeypatch):
         payload = {"data": "not-a-list"}
         monkeypatch.setattr(
             fetch_calendar.urllib.request, "urlopen", lambda *a, **k: _FakeResponse(payload)
         )
-        result = fetch_calendar.fetch_calendar("usd", 50, 1)
-        assert result["events"] == []
 
-    def test_malformed_payload_data_list_of_non_dicts_does_not_crash(self, monkeypatch):
-        # A list of non-dict items must not raise AttributeError on the
-        # market_tier access in the min_tier filter (default --min-tier=1).
+        with pytest.raises(RuntimeError, match="data field must be an array"):
+            fetch_calendar.fetch_calendar("usd", 50, 1)
+
+    def test_malformed_payload_data_list_of_non_dicts_fails_closed(self, monkeypatch):
         payload = {"data": ["oops", 3, None]}
         monkeypatch.setattr(
             fetch_calendar.urllib.request, "urlopen", lambda *a, **k: _FakeResponse(payload)
         )
-        result = fetch_calendar.fetch_calendar("usd", 50, 1)
-        assert result["events"] == []
+
+        with pytest.raises(RuntimeError, match=r"data\[0\] must be an object"):
+            fetch_calendar.fetch_calendar("usd", 50, 1)
+
+    @pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_number_in_event_fails_closed(self, monkeypatch, non_finite):
+        payload = {
+            "data": [
+                {
+                    "event": "CPI",
+                    "market_tier": 1,
+                    "details": {"actual": non_finite},
+                }
+            ]
+        }
+        monkeypatch.setattr(
+            fetch_calendar.urllib.request, "urlopen", lambda *a, **k: _FakeResponse(payload)
+        )
+
+        with pytest.raises(RuntimeError, match="non-finite number"):
+            fetch_calendar.fetch_calendar("usd", 50, 1)
+
+    def test_overflowed_json_number_fails_closed(self, monkeypatch):
+        class RawResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+            def read(self):
+                return b'{"data":[{"event":"CPI","market_tier":1,"actual":1e309}]}'
+
+        monkeypatch.setattr(fetch_calendar.urllib.request, "urlopen", lambda *a, **k: RawResponse())
+
+        with pytest.raises(RuntimeError, match="non-finite number"):
+            fetch_calendar.fetch_calendar("usd", 50, 1)
+
+    def test_uses_canonical_api_host(self, monkeypatch):
+        seen_urls = []
+
+        def fake_urlopen(request, **kwargs):
+            seen_urls.append(request.full_url)
+            return _FakeResponse({"data": []})
+
+        monkeypatch.setattr(fetch_calendar.urllib.request, "urlopen", fake_urlopen)
+
+        fetch_calendar.fetch_calendar("usd", 50, 1)
+
+        assert seen_urls[0].startswith("https://api.fxmacrodata.com/v1/calendar/usd?")
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +222,19 @@ class TestFetchCalendar:
 
 
 class TestMainErrorHandling:
+    def test_cli_rejects_out_of_range_min_tier(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["fetch_calendar.py", "--currency", "usd", "--min-tier", "99"],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            fetch_calendar.main()
+
+        assert exc_info.value.code != 0
+        assert "invalid choice" in capsys.readouterr().err
+
     def test_invalid_currency_never_leaks_api_key_or_traceback(self, monkeypatch, capsys):
         monkeypatch.setenv("FXMACRODATA_API_KEY", "REVIEW_SECRET_123")
         monkeypatch.setattr(
@@ -215,3 +284,36 @@ class TestMainErrorHandling:
         assert exc_info.value.code != 0
         captured = capsys.readouterr()
         assert "connection refused" in captured.err
+
+    def test_non_finite_api_value_exits_nonzero_without_invalid_json(self, monkeypatch, capsys):
+        payload = {"data": [{"event": "CPI", "market_tier": 1, "actual": float("nan")}]}
+        monkeypatch.setattr(
+            fetch_calendar.urllib.request, "urlopen", lambda *a, **k: _FakeResponse(payload)
+        )
+        monkeypatch.setattr(sys, "argv", ["fetch_calendar.py", "--currency", "usd"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            fetch_calendar.main()
+
+        assert exc_info.value.code != 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "non-finite number" in captured.err
+        assert "NaN" not in captured.out
+        assert "Infinity" not in captured.out
+
+    def test_allow_nan_false_is_a_serialization_backstop(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            fetch_calendar,
+            "fetch_calendar",
+            lambda *a, **k: {"events": [], "actual": float("nan")},
+        )
+        monkeypatch.setattr(sys, "argv", ["fetch_calendar.py", "--currency", "usd"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            fetch_calendar.main()
+
+        assert exc_info.value.code != 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "could not be serialized" in captured.err

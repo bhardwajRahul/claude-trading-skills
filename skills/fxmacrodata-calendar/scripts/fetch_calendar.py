@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import math
 import os
 import sys
 import urllib.error
@@ -13,7 +14,12 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlencode
 
-FXMACRODATA_BASE_URL = "https://fxmacrodata.com/api/v1"
+FXMACRODATA_BASE_URL = "https://api.fxmacrodata.com/v1"
+VALID_MARKET_TIERS = frozenset({1, 2, 3})
+
+
+class _NonFiniteJSONValue(ValueError):
+    """Raised when the JSON decoder encounters NaN or Infinity."""
 
 
 def _normalize_currency(value: str) -> str:
@@ -24,25 +30,28 @@ def _normalize_currency(value: str) -> str:
     return normalized
 
 
-def _tier_rank(value: Any) -> int:
-    """Coerce a market_tier value into a comparable int rank.
-
-    The live FXMacroData API always returns market_tier as an int (1/2/3);
-    string importance labels (low/medium/high) live in a separate
-    event_importance field, one-to-one with tier. This function does not
-    implement any label-to-tier mapping. It only guards against unexpected
-    non-int input by excluding it under a restrictive --min-tier: bools and
-    anything that cannot be parsed as an int are ranked 99 (i.e. filtered
-    out unless min_tier is set very high).
-    """
-    if isinstance(value, bool):
-        return 99
-    if isinstance(value, int):
+def _tier_rank(value: Any) -> int | None:
+    """Return an API-contract market tier, or None for invalid input."""
+    if isinstance(value, int) and not isinstance(value, bool) and value in VALID_MARKET_TIERS:
         return value
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return 99
+    return None
+
+
+def _reject_non_finite_constant(value: str) -> None:
+    """Reject the non-standard JSON constants NaN and Infinity."""
+    raise _NonFiniteJSONValue(value)
+
+
+def _validate_finite_json(value: Any) -> None:
+    """Recursively reject numbers that decoded to NaN or Infinity."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise RuntimeError("FXMacroData API returned invalid response: non-finite number")
+    if isinstance(value, dict):
+        for item in value.values():
+            _validate_finite_json(item)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_finite_json(item)
 
 
 def _redact(text: str) -> str:
@@ -61,6 +70,8 @@ def _redact(text: str) -> str:
 
 def fetch_calendar(currency: str, limit: int, min_tier: int | None) -> dict[str, Any]:
     normalized_currency = _normalize_currency(currency)
+    if min_tier is not None and _tier_rank(min_tier) is None:
+        raise RuntimeError("min_tier must be one of 1, 2, or 3")
     limit_count = max(1, min(int(limit), 100))
     params = {"limit": str(limit_count)}
     api_key = os.getenv("FXMACRODATA_API_KEY")
@@ -73,7 +84,7 @@ def fetch_calendar(currency: str, limit: int, min_tier: int | None) -> dict[str,
             url, headers={"User-Agent": "claude-trading-skills-fxmacrodata/1.0"}
         )
         with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.load(response)
+            payload = json.load(response, parse_constant=_reject_non_finite_constant)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(
             f"FXMacroData API request failed for currency={normalized_currency}: HTTP {exc.code}"
@@ -86,6 +97,8 @@ def fetch_calendar(currency: str, limit: int, min_tier: int | None) -> dict[str,
         raise RuntimeError(
             f"FXMacroData API request timed out for currency={normalized_currency}"
         ) from exc
+    except _NonFiniteJSONValue as exc:
+        raise RuntimeError("FXMacroData API returned invalid response: non-finite number") from exc
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise RuntimeError(
             f"FXMacroData API returned invalid JSON for currency={normalized_currency}"
@@ -95,16 +108,31 @@ def fetch_calendar(currency: str, limit: int, min_tier: int | None) -> dict[str,
             f"FXMacroData API request could not be built for currency={normalized_currency}"
         ) from exc
 
+    _validate_finite_json(payload)
     if not isinstance(payload, dict):
-        payload = {}
+        raise RuntimeError(
+            "FXMacroData API returned invalid response: top-level JSON must be an object"
+        )
+    if "data" not in payload:
+        raise RuntimeError("FXMacroData API returned invalid response: missing required data field")
 
-    data = payload.get("data", [])
-    # Keep only dict rows: a malformed payload with non-dict list items must
-    # not crash on event.get(...) below (event_importance/market_tier access).
-    events = [event for event in data if isinstance(event, dict)] if isinstance(data, list) else []
+    data = payload["data"]
+    if not isinstance(data, list):
+        raise RuntimeError("FXMacroData API returned invalid response: data field must be an array")
 
-    if min_tier is not None:
-        events = [event for event in events if _tier_rank(event.get("market_tier")) <= min_tier]
+    events: list[dict[str, Any]] = []
+    for index, event in enumerate(data):
+        if not isinstance(event, dict):
+            raise RuntimeError(
+                f"FXMacroData API returned invalid response: data[{index}] must be an object"
+            )
+        tier = _tier_rank(event.get("market_tier"))
+        if tier is None:
+            raise RuntimeError(
+                f"FXMacroData API returned invalid response: invalid market_tier at data[{index}]"
+            )
+        if min_tier is None or tier <= min_tier:
+            events.append(event)
 
     events = events[:limit_count]
     return {
@@ -119,7 +147,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--currency", default="usd")
     parser.add_argument("--limit", type=int, default=50)
-    parser.add_argument("--min-tier", type=int, default=1)
+    parser.add_argument("--min-tier", type=int, choices=(1, 2, 3), default=1)
     args = parser.parse_args()
 
     try:
@@ -128,7 +156,13 @@ def main() -> None:
         print(_redact(f"Error: {exc}"), file=sys.stderr)
         sys.exit(1)
 
-    print(json.dumps(result, indent=2))
+    try:
+        serialized = json.dumps(result, indent=2, allow_nan=False)
+    except (TypeError, ValueError):
+        print("Error: result could not be serialized as strict JSON", file=sys.stderr)
+        sys.exit(1)
+
+    print(serialized)
     sys.exit(0)
 
 

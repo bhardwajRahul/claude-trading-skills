@@ -60,6 +60,10 @@ python3 skills/fxmacrodata-calendar/scripts/fetch_calendar.py --currency usd --m
 
 2. Review `events[]` for top-tier releases.
 
+   Treat a nonzero exit as an unverified event-risk state, never as an empty
+   calendar. Only a successful response containing `events: []` establishes
+   that no matching events were returned.
+
 3. Fold the event timing into the trade plan:
    - pause new entries around high-impact releases;
    - reduce leverage or position size;

@@ -19,6 +19,10 @@ top-tier macro risk check.
 
 2. Review `events[]` for top-tier releases.
 
+   Treat a nonzero exit as an unverified event-risk state, never as an empty
+   calendar. Only a successful response containing `events: []` establishes
+   that no matching events were returned.
+
 3. Fold the event timing into the trade plan:
    - pause new entries around high-impact releases;
    - reduce leverage or position size;
@@ -28,4 +32,6 @@ top-tier macro risk check.
 ## Authentication
 
 Set `FXMACRODATA_API_KEY` for authenticated FXMacroData endpoints. Public USD
-calendar rows can be fetched without a key.
+calendar rows can be fetched without a key. The client uses the canonical
+`https://api.fxmacrodata.com/v1` endpoint and accepts `--min-tier` values 1,
+2, or 3 only.
