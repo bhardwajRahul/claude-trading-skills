@@ -62,7 +62,11 @@ python3 skills/fxmacrodata-calendar/scripts/fetch_calendar.py --currency usd --m
 
    Treat a nonzero exit as an unverified event-risk state, never as an empty
    calendar. Only a successful response containing `events: []` establishes
-   that no matching events were returned.
+   that no matching events were returned. The client accepts results only when
+   the response currency matches the request and `data_quality` confirms an
+   official, current, non-proxy, non-fallback, timestamp-complete,
+   point-in-time-safe source. Each event must include an announcement timestamp
+   and a non-empty release identifier.
 
 3. Fold the event timing into the trade plan:
    - pause new entries around high-impact releases;

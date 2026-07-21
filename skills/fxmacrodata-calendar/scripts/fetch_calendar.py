@@ -16,6 +16,22 @@ from urllib.parse import urlencode
 
 FXMACRODATA_BASE_URL = "https://api.fxmacrodata.com/v1"
 VALID_MARKET_TIERS = frozenset({1, 2, 3})
+QUALITY_BOOLEAN_FIELDS = (
+    "is_official",
+    "is_proxy",
+    "is_fallback",
+    "is_stale",
+    "has_announcement_datetime",
+    "point_in_time_safe",
+)
+SAFE_QUALITY_VALUES = {
+    "is_official": True,
+    "is_proxy": False,
+    "is_fallback": False,
+    "is_stale": False,
+    "has_announcement_datetime": True,
+    "point_in_time_safe": True,
+}
 
 
 class _NonFiniteJSONValue(ValueError):
@@ -43,15 +59,97 @@ def _reject_non_finite_constant(value: str) -> None:
 
 
 def _validate_finite_json(value: Any) -> None:
-    """Recursively reject numbers that decoded to NaN or Infinity."""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise RuntimeError("FXMacroData API returned invalid response: non-finite number")
-    if isinstance(value, dict):
-        for item in value.values():
-            _validate_finite_json(item)
-    elif isinstance(value, list):
-        for item in value:
-            _validate_finite_json(item)
+    """Iteratively reject numbers that decoded to NaN or Infinity."""
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, float) and not math.isfinite(current):
+            raise RuntimeError("FXMacroData API returned invalid response: non-finite number")
+        if isinstance(current, dict):
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+
+
+def _validate_data_quality(data_quality: Any) -> dict[str, Any]:
+    """Require analysis-ready official, fresh, point-in-time-safe metadata."""
+    if not isinstance(data_quality, dict):
+        raise RuntimeError(
+            "FXMacroData API returned invalid response: data_quality must be an object"
+        )
+
+    for field in QUALITY_BOOLEAN_FIELDS:
+        if field not in data_quality:
+            raise RuntimeError(
+                f"FXMacroData API returned invalid response: data_quality.{field} is required"
+            )
+        if not isinstance(data_quality[field], bool):
+            raise RuntimeError(
+                f"FXMacroData API returned invalid response: data_quality.{field} must be a boolean"
+            )
+        if data_quality[field] is not SAFE_QUALITY_VALUES[field]:
+            raise RuntimeError(
+                "FXMacroData API returned unsafe response: "
+                f"data_quality.{field} is not analysis-ready"
+            )
+
+    source_type = data_quality.get("source_type")
+    if not isinstance(source_type, str):
+        raise RuntimeError(
+            "FXMacroData API returned invalid response: data_quality.source_type must be a string"
+        )
+    if source_type != "official":
+        raise RuntimeError(
+            "FXMacroData API returned unsafe response: data_quality.source_type must be official"
+        )
+    return data_quality
+
+
+def _validate_calendar_payload(payload: Any, expected_currency: str) -> dict[str, Any]:
+    """Validate the OpenAPI calendar contract and analysis-readiness policy."""
+    _validate_finite_json(payload)
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "FXMacroData API returned invalid response: top-level JSON must be an object"
+        )
+
+    response_currency = payload.get("currency")
+    if not isinstance(response_currency, str) or response_currency != expected_currency:
+        raise RuntimeError(
+            "FXMacroData API returned invalid response: "
+            "currency must exactly match the requested currency"
+        )
+
+    _validate_data_quality(payload.get("data_quality"))
+
+    if "data" not in payload:
+        raise RuntimeError("FXMacroData API returned invalid response: missing required data field")
+    data = payload["data"]
+    if not isinstance(data, list):
+        raise RuntimeError("FXMacroData API returned invalid response: data field must be an array")
+
+    for index, event in enumerate(data):
+        if not isinstance(event, dict):
+            raise RuntimeError(
+                f"FXMacroData API returned invalid response: data[{index}] must be an object"
+            )
+        announcement_datetime = event.get("announcement_datetime")
+        if not isinstance(announcement_datetime, int) or isinstance(announcement_datetime, bool):
+            raise RuntimeError(
+                "FXMacroData API returned invalid response: "
+                f"announcement_datetime at data[{index}] must be an integer"
+            )
+        release = event.get("release")
+        if not isinstance(release, str) or not release.strip():
+            raise RuntimeError(
+                "FXMacroData API returned invalid response: "
+                f"release at data[{index}] must be a non-empty string"
+            )
+        if _tier_rank(event.get("market_tier")) is None:
+            raise RuntimeError(
+                f"FXMacroData API returned invalid response: invalid market_tier at data[{index}]"
+            )
+    return payload
 
 
 def _redact(text: str) -> str:
@@ -99,6 +197,11 @@ def fetch_calendar(currency: str, limit: int, min_tier: int | None) -> dict[str,
         ) from exc
     except _NonFiniteJSONValue as exc:
         raise RuntimeError("FXMacroData API returned invalid response: non-finite number") from exc
+    except RecursionError as exc:
+        raise RuntimeError(
+            f"FXMacroData API returned invalid JSON for currency={normalized_currency}: "
+            "nesting exceeds the decoder limit"
+        ) from exc
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise RuntimeError(
             f"FXMacroData API returned invalid JSON for currency={normalized_currency}"
@@ -108,37 +211,20 @@ def fetch_calendar(currency: str, limit: int, min_tier: int | None) -> dict[str,
             f"FXMacroData API request could not be built for currency={normalized_currency}"
         ) from exc
 
-    _validate_finite_json(payload)
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            "FXMacroData API returned invalid response: top-level JSON must be an object"
-        )
-    if "data" not in payload:
-        raise RuntimeError("FXMacroData API returned invalid response: missing required data field")
-
+    payload = _validate_calendar_payload(payload, normalized_currency.upper())
     data = payload["data"]
-    if not isinstance(data, list):
-        raise RuntimeError("FXMacroData API returned invalid response: data field must be an array")
 
     events: list[dict[str, Any]] = []
-    for index, event in enumerate(data):
-        if not isinstance(event, dict):
-            raise RuntimeError(
-                f"FXMacroData API returned invalid response: data[{index}] must be an object"
-            )
-        tier = _tier_rank(event.get("market_tier"))
-        if tier is None:
-            raise RuntimeError(
-                f"FXMacroData API returned invalid response: invalid market_tier at data[{index}]"
-            )
+    for event in data:
+        tier: int = event["market_tier"]
         if min_tier is None or tier <= min_tier:
             events.append(event)
 
     events = events[:limit_count]
     return {
-        "currency": payload.get("currency", normalized_currency.upper()),
+        "currency": payload["currency"],
         "timezone": payload.get("timezone"),
-        "data_quality": payload.get("data_quality"),
+        "data_quality": payload["data_quality"],
         "events": events,
     }
 
@@ -158,7 +244,7 @@ def main() -> None:
 
     try:
         serialized = json.dumps(result, indent=2, allow_nan=False)
-    except (TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError):
         print("Error: result could not be serialized as strict JSON", file=sys.stderr)
         sys.exit(1)
 
