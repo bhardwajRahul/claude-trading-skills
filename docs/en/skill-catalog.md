@@ -10,7 +10,7 @@ permalink: /en/skill-catalog/
 # Skill Catalog
 {: .no_toc }
 
-A comprehensive catalog of all 72 Claude Trading Skills organized by category. Badge indicators show API requirements at a glance.
+A comprehensive catalog of all 73 Claude Trading Skills organized by category. Badge indicators show API requirements at a glance.
 {: .fs-6 .fw-300 }
 
 > Use English skill names ("CANSLIM", "VCP", "FinViz", etc.) for best search results on this page.
@@ -78,6 +78,7 @@ A comprehensive catalog of all 72 Claude Trading Skills organized by category. B
 | `kanchi-dividend-sop` | `workflow_step` | — |
 | `kanchi-dividend-us-tax-accounting` | `workflow_step` | — |
 | `macro-regime-detector` | `workflow_step` | — |
+| `manifoldbt-backtester` | `research_only` | — |
 | `market-breadth-analyzer` | `workflow_step` | — |
 | `market-environment-analysis` | `workflow_step` | — |
 | `market-news-analyst` | `workflow_step` | — |
@@ -168,6 +169,7 @@ A comprehensive catalog of all 72 Claude Trading Skills organized by category. B
 | **[Theme Detector]({{ '/en/skills/theme-detector/' | relative_url }})** | Detects trending bullish and bearish market themes with 3-dimensional scoring: Theme Heat (0-100), Lifecycle Maturity, and Confidence. 14+ cross-sector themes | <span class="badge badge-free">No API</span> <span class="badge badge-optional">FMP Optional</span> <span class="badge badge-optional">FINVIZ Optional</span> |
 | **[Scenario Analyzer]({{ '/en/skills/scenario-analyzer/' | relative_url }})** | Builds 18-month scenario projections from news headlines. Dual-agent architecture with 1st/2nd/3rd order effects and recommended tickers | <span class="badge badge-free">No API</span> |
 | **[Backtest Expert]({{ '/en/skills/backtest-expert/' | relative_url }})** | Professional-grade strategy validation framework with hypothesis definition, parameter robustness checks, walk-forward testing, and failure post-mortems | <span class="badge badge-free">No API</span> |
+| **[manifoldbt Backtester]({{ '/en/skills/manifoldbt-backtester/' | relative_url }})** | Runs a declarative strategy spec over OHLCV bars with the manifoldbt Rust engine and emits the eight inputs backtest-expert scores | <span class="badge badge-free">No API</span> |
 | **[MT5 Robot Tester]({{ '/en/skills/mt5-robot-tester/' | relative_url }})** | Batch-tests local MetaTrader 5 Expert Advisors through a resumable three-round pipeline with fail-closed file handling, deterministic gates, and cross-run learnings. Requires Windows, MT5, EA files, and broker tick data | <span class="badge badge-free">No API</span> |
 | **[Stockbee 20% Study]({{ '/en/skills/stockbee-20pct-study/' | relative_url }})** | Builds a daily +20%/-20% mover model book, classifies catalyst and chart context, updates forward outcomes, and mines cohorts for research prompts. Study workflow only — not a buy/sell signal service | <span class="badge badge-api">FMP Required</span> <span class="badge badge-optional">Local JSON Optional</span> |
 | **Options Strategy Advisor** | Educational options tool using Black-Scholes pricing. Calculates Greeks (Delta, Gamma, Theta, Vega, Rho), supports 17+ strategies, P/L simulation | <span class="badge badge-optional">FMP Optional</span> |
@@ -286,6 +288,7 @@ A comprehensive catalog of all 72 Claude Trading Skills organized by category. B
 ### I want to validate a strategy
 
 - **[Backtest Expert]({{ '/en/skills/backtest-expert/' | relative_url }})** -- Professional-grade backtesting framework
+- **[manifoldbt Backtester]({{ '/en/skills/manifoldbt-backtester/' | relative_url }})** -- Executes a strategy spec and produces the metrics backtest-expert scores
 - **Strategy Pivot Designer** -- Generate new approaches when optimization stalls
 
 ---
@@ -308,6 +311,7 @@ A comprehensive catalog of all 72 Claude Trading Skills organized by category. B
 | Technical Analyst | Optional | -- | -- |
 | Market News Analyst | -- | -- | -- |
 | Market Environment Analysis | -- | -- | -- |
+| manifoldbt Backtester | -- | -- | -- |
 | Market Breadth Analyzer | -- | -- | -- |
 | Uptrend Analyzer | -- | -- | -- |
 | Macro Regime Detector | Optional | -- | -- |
