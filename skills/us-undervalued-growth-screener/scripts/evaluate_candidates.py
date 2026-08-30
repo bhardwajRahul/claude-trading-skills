@@ -3211,8 +3211,28 @@ def render_markdown(report: Mapping[str, Any], *, language: str = "en") -> str:
         f"- **{_label(language, 'Candidate-pool full-fundamental coverage (informational)', '候補プール完全財務カバレッジ（参考）')}:** {_format_pct(audit.get('actual_candidate_pool_fundamental_complete_pct'), 1, missing)}"
     )
     lines.append(
-        f"- **{_label(language, 'Universe scope', 'ユニバース範囲')}:** complete={scope.get('scope_complete', False)} / requested ${scope.get('requested_min_market_cap', missing)}-${scope.get('requested_max_market_cap', missing)} / retrieved ${scope.get('retrieval_min_market_cap', missing)}-${scope.get('retrieval_max_market_cap', missing)}"
+        f"- **{_label(language, 'Listing enumeration', 'リスティング列挙')}:** complete={scope.get('scope_complete', False)} / requested ${scope.get('requested_min_market_cap', missing)}-${scope.get('requested_max_market_cap', missing)} / retrieved ${scope.get('retrieval_min_market_cap', missing)}-${scope.get('retrieval_max_market_cap', missing)}"
     )
+    generation = _mapping(_mapping(audit.get("candidate_pool")).get("generation_audit"))
+    if generation:
+        universe_total = _integer(_mapping(audit.get("universe")).get("row_count"))
+        mode = _text(generation.get("estimate_acquisition_mode")) or missing
+        bulk = _mapping(generation.get("bulk_estimate_audit"))
+        covered = _integer(bulk.get("covered_symbol_count"))
+        seed_info = _mapping(generation.get("seed_audit"))
+        seeds = _integer(seed_info.get("seed_limit_effective"))
+        if mode == "analyst_estimates_bulk" and covered is not None and universe_total:
+            coverage = f"{covered} / {universe_total} ({covered / universe_total * 100.0:.1f}%)"
+            status = "complete" if covered >= universe_total else "partial"
+        elif seeds is not None and universe_total:
+            coverage = f"{seeds} / {universe_total} ({seeds / universe_total * 100.0:.1f}%)"
+            status = "partial"
+        else:
+            coverage = missing
+            status = "partial"
+        lines.append(
+            f"- **{_label(language, 'Economic estimate coverage', '経済スクリーン範囲')}:** {status} / mode={mode} / {coverage} -- {_label(language, 'never a market-wide conclusion under', '以下の範囲での結論に限定')} conclusion_scope={audit.get('conclusion_scope', missing)}"
+        )
     lines.append(
         f"- **{_label(language, 'Market assumptions', '市場前提')}:** {market.get('summary', missing)}"
     )

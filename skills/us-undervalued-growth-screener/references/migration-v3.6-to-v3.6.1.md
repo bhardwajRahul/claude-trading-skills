@@ -64,6 +64,12 @@ Route selection and completeness are separate thresholds: the bulk route is used
 
 Gold, silver, precious/base metals, copper, uranium, coal, metals & mining, and mineral names classify as cyclicality 4; aluminum and semiconductor equipment as 3 (the bare `semiconductor` needle was removed so equipment names do not inherit 4). Rows whose ISIN prefix (or, failing that, listing country) is not `US` carry `foreign_private_issuer_review`, and their packets add `form_20f_6k_verification` to `required_next_checks`. Neither flag excludes a name.
 
+### Pool floor and sector profiles (round-4 review)
+
+- `build_provider_prefilter_pool` waives the minimum-pool row floor only when `provider_exhausted_scope` is a full exhaustion (`economic_candidate_universe` or `full_input`; a missing scope keeps the legacy CLI waiver). The per-symbol fallback passes `estimate_seed`, which never waives the floor; `pool_floor_waived` is recorded in the audit.
+- `normalize_listing` infers `sector_profile_type` (reit / insurance / bank / asset_manager / bdc / mlp / auto_dealership) from sector+industry text, so `screen_universe`'s existing sector gates actually fire: such names without sector-specific valuation evidence go to `sector_specific_valuation_required`, and the general-company `excessive_leverage` hard gate is skipped for them (a mortgage REIT at 13x net debt/EBITDA is normal, not a failure).
+- The Markdown report renames "Universe scope" to "Listing enumeration" and adds an "Economic estimate coverage" line (mode, covered/universe counts, conclusion scope), so the bounded economic scope is visible in prose, not only in JSON.
+
 ### Endpoint capability cache
 
 The generated client remembers a 402/403 bulk response in the SQLite cache (`capability:<url>`, 30-day TTL) and pre-disables that endpoint on later runs without spending a call. `respect_capability_cache=False` re-probes unconditionally. Diagnostics add `capability_cache_hits` and `remaining_calls`.

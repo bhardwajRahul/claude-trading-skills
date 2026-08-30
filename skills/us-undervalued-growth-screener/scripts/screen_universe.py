@@ -464,7 +464,16 @@ def _candidate_decision(
         hard_fail.append("non_positive_standard_fcf")
     if roic is not None and roic < 0:
         hard_fail.append("negative_roic")
-    if leverage is not None and leverage > float(config.get("hard_max_net_debt_to_ebitda", 4.0)):
+    if (
+        leverage is not None
+        and leverage > float(config.get("hard_max_net_debt_to_ebitda", 4.0))
+        # General-company net debt/EBITDA is meaningless for balance-sheet
+        # businesses (mortgage REITs, banks, insurers, BDCs, MLPs, asset
+        # managers): a mortgage REIT at 13x is normal, not a hard failure.
+        # Those profiles are already routed to
+        # sector_specific_valuation_required until sector metrics exist.
+        and profile_type not in SECTOR_PROFILES
+    ):
         hard_fail.append("excessive_leverage")
     if forward_pe is not None and forward_pe > float(
         config.get("maximum_forward_pe_for_economic_screen", 60.0)

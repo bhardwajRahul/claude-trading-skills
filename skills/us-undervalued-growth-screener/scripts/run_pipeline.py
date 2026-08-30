@@ -235,6 +235,33 @@ def is_common_stock(row: Mapping[str, Any]) -> bool:
     return symbol != "UNKNOWN"
 
 
+SECTOR_PROFILE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("reit", ("reit",)),
+    ("insurance", ("insurance",)),
+    ("bank", ("bank",)),
+    ("asset_manager", ("asset management",)),
+    ("bdc", ("business development", "bdc")),
+    ("mlp", ("mlp", "master limited partnership")),
+    ("auto_dealership", ("auto & truck dealership", "auto dealership", "truck dealership")),
+)
+
+
+def infer_sector_profile_type(sector: str | None, industry: str | None) -> str:
+    """Map sector/industry text onto screen_universe's sector-profile gates.
+
+    Names whose standard company multiples are not comparable (mortgage REITs,
+    insurers, banks, asset managers, BDCs, MLPs, auto dealers) must reach the
+    broad screen tagged so that, absent sector-specific valuation evidence,
+    they are routed to ``sector_specific_valuation_required`` instead of being
+    scored (or excluded) on general-company metrics such as net debt/EBITDA.
+    """
+    text = f"{sector or ''} {industry or ''}".lower()
+    for profile, needles in SECTOR_PROFILE_RULES:
+        if any(needle in text for needle in needles):
+            return profile
+    return "general"
+
+
 def normalize_listing(row: Mapping[str, Any], exchange: str) -> dict[str, Any] | None:
     price = _first_number(row, "price", "last")
     market_cap = _first_number(row, "marketCap", "mktCap", "market_cap")
@@ -257,6 +284,9 @@ def normalize_listing(row: Mapping[str, Any], exchange: str) -> dict[str, Any] |
         "common_stock": is_common_stock(row),
         "currency": _text(row.get("currency")),
         "country": _text(row.get("country")),
+        "sector_profile_type": infer_sector_profile_type(
+            _text(row.get("sector")), _text(row.get("industry"))
+        ),
     }
 
 

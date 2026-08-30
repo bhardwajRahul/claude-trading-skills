@@ -47,6 +47,12 @@ ALLOWED_LANES = {
     "cyclical_normalization",
 }
 
+# provider_exhausted_scope values that justify waiving the minimum-pool floor:
+# only a fully exhausted economic candidate universe (or a caller-supplied
+# full-input pool) qualifies. "estimate_seed" -- the per-symbol fallback path --
+# never does: it exhausts a bounded sample, not the market.
+FULL_EXHAUSTION_SCOPES = frozenset({"economic_candidate_universe", "full_input"})
+
 
 def _number(value: Any) -> float | None:
     if isinstance(value, bool):
@@ -292,7 +298,15 @@ def build_pool(
     selected.sort(
         key=lambda row: (-float(row.get("provider_prefilter_best_score") or -1e9), _symbol(row))
     )
-    pool_adequate = len(selected) >= minimum_pool or provider_exhausted
+    # The row-count floor may be waived only when the WHOLE economic candidate
+    # universe was exhausted. Exhausting a bounded slice of it (the estimate
+    # seed on the per-symbol fallback path) does not make a thin pool
+    # adequate. A missing scope keeps the legacy CLI semantics (full waiver)
+    # for callers that predate provider_exhausted_scope.
+    allow_small_pool = provider_exhausted and (
+        provider_exhausted_scope is None or provider_exhausted_scope in FULL_EXHAUSTION_SCOPES
+    )
+    pool_adequate = len(selected) >= minimum_pool or allow_small_pool
     # A symbol can legitimately qualify for multiple opportunity lanes.  Audit
     # represented lanes from final memberships rather than only the loop that
     # first inserted the unique symbol; otherwise an overlapping core/high-growth
@@ -328,6 +342,7 @@ def build_pool(
         "minimum_pool": minimum_pool,
         "provider_exhausted": provider_exhausted,
         "provider_exhausted_scope": provider_exhausted_scope,
+        "pool_floor_waived": allow_small_pool and len(selected) < minimum_pool,
         "pool_adequate": pool_adequate,
         "fcf_prefilter_excluded_symbols": fcf_prefilter_excluded_symbols,
         "fcf_prefilter_excluded_count": len(fcf_prefilter_excluded_symbols),
