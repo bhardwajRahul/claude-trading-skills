@@ -778,6 +778,58 @@ def economic_scope_complete(
     )
 
 
+_SECTOR_METRIC_FIELDS = (
+    "sector_forward_multiple",
+    "p_to_tbv",
+    "p_to_affo",
+    "p_to_book",
+    "sector_per_share_growth_pct",
+    "affo_per_share_growth_pct",
+    "tbv_per_share_growth_pct",
+    "sector_adjusted_net_debt_to_ebitda",
+)
+
+
+def mark_sector_profile_exhaustion(
+    rows: Sequence[Mapping[str, Any]], *, source_id: str
+) -> list[dict[str, Any]]:
+    """Declare enrichment exhaustion for sector-profile rows the provider cannot serve.
+
+    Balance-sheet businesses (REITs, banks, insurers, BDCs, MLPs, asset
+    managers, auto dealers) need sector-specific valuation evidence
+    (P/FFO-AFFO, P/TBV, adjusted leverage) that the direct-FMP discovery path
+    does not provide. Without this declaration such rows stay
+    ``needs_enrichment`` forever and the run cannot complete; with it,
+    ``screen_universe`` resolves them as ``unavailable_after_enrichment`` —
+    still visible in the audit, honestly excluded from selection, and eligible
+    for manual sector underwriting in a scoped follow-up.
+    """
+    output: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        profile = _text(row.get("sector_profile_type")) or "general"
+        has_sector_metrics = any(
+            _first_number(row, field) is not None for field in _SECTOR_METRIC_FIELDS
+        )
+        if profile != "general" and not has_sector_metrics:
+            row.setdefault("enrichment_attempted", True)
+            row["enrichment_exhausted"] = True
+            row["enrichment_exhaustion_reason"] = (
+                f"sector-specific valuation metrics for profile '{profile}' are not "
+                "available from the direct-FMP discovery path"
+            )
+            sources = [
+                value
+                for value in (row.get("enrichment_source_ids") or [])
+                if isinstance(value, str) and value.strip()
+            ]
+            if source_id not in sources:
+                sources.append(source_id)
+            row["enrichment_source_ids"] = sources
+        output.append(row)
+    return output
+
+
 def _is_foreign_private_issuer(row: Mapping[str, Any]) -> bool:
     """Heuristic FPI flag: ISIN country prefix when available, else listing country."""
     isin = _text(row.get("isin"))
@@ -1555,6 +1607,9 @@ def execute_pipeline(
         actual_source_id=f"fmp-income-statement-annual-{analysis_as_of.date().isoformat()}",
     )
     _write_json(audit_dir / "quality-probe-audit.json", quality_probe_audit)
+    normalized_estimates = mark_sector_profile_exhaustion(
+        normalized_estimates, source_id=quality_probe_source_id
+    )
     # growth_pattern is fixed at normalization (consensus basis) and the probe
     # never relabels it; the recompute below is defensive so pool lane tags
     # always match what lane_memberships would produce for the final rows.

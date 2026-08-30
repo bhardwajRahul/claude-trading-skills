@@ -136,5 +136,39 @@ class SectorProfileInferenceTests(unittest.TestCase):
         self.assertNotIn("excessive_leverage", d.get("screen_fail_reasons") or [])
 
 
+class SectorExhaustionTests(unittest.TestCase):
+    def test_reit_without_sector_metrics_is_declared_exhausted(self) -> None:
+        rows = [
+            {"symbol": "ABR", "sector_profile_type": "reit"},
+            {"symbol": "GEN", "sector_profile_type": "general"},
+            {"symbol": "AFO", "sector_profile_type": "reit", "p_to_affo": 9.5},
+        ]
+        out = PIPELINE.mark_sector_profile_exhaustion(rows, source_id="fmp-key-metrics-ttm-x")
+        by = {r["symbol"]: r for r in out}
+        self.assertTrue(by["ABR"]["enrichment_exhausted"])
+        self.assertIn("reit", by["ABR"]["enrichment_exhaustion_reason"])
+        self.assertEqual(by["ABR"]["enrichment_source_ids"], ["fmp-key-metrics-ttm-x"])
+        self.assertNotIn("enrichment_exhausted", by["GEN"])
+        self.assertNotIn("enrichment_exhausted", by["AFO"])  # has a sector metric
+
+    def test_exhausted_reit_resolves_as_unavailable_after_enrichment(self) -> None:
+        base = json.loads(
+            (ASSETS_DIR / "enriched-candidate-pool.example.jsonl").read_text().splitlines()[0]
+        )
+        config = json.loads((ASSETS_DIR / "screening-config.example.json").read_text())
+        base["sector_profile_type"] = "reit"
+        base["net_debt_to_ebitda"] = 13.2
+        [marked] = PIPELINE.mark_sector_profile_exhaustion(
+            [base], source_id="fmp-key-metrics-ttm-x"
+        )
+        decision = SCREEN._candidate_decision(
+            marked, config, "liquidity_stratified_estimates", "2026-08-22T14:00:00-07:00"
+        )
+        d = decision["decision"]
+        self.assertEqual(d.get("status"), "unavailable_after_enrichment")
+        self.assertEqual(d.get("resolution"), "resolved")
+        self.assertIn("sector_specific_valuation_required", d.get("blocking_review_reasons") or [])
+
+
 if __name__ == "__main__":
     unittest.main()
