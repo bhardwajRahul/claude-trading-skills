@@ -301,11 +301,9 @@ def build_pool(
     # The row-count floor may be waived only when the WHOLE economic candidate
     # universe was exhausted. Exhausting a bounded slice of it (the estimate
     # seed on the per-symbol fallback path) does not make a thin pool
-    # adequate. A missing scope keeps the legacy CLI semantics (full waiver)
-    # for callers that predate provider_exhausted_scope.
-    allow_small_pool = provider_exhausted and (
-        provider_exhausted_scope is None or provider_exhausted_scope in FULL_EXHAUSTION_SCOPES
-    )
+    # adequate. Fail closed: a caller that does not state its exhaustion scope
+    # gets no waiver either — an unstated scope proves nothing.
+    allow_small_pool = provider_exhausted and provider_exhausted_scope in FULL_EXHAUSTION_SCOPES
     pool_adequate = len(selected) >= minimum_pool or allow_small_pool
     # A symbol can legitimately qualify for multiple opportunity lanes.  Audit
     # represented lanes from final memberships rather than only the loop that

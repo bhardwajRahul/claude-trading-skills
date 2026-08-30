@@ -412,6 +412,37 @@ def _candidate_decision(
             blocking_review.append("sector_adjusted_leverage_required")
         else:
             leverage = adjusted
+    # Foreign issuers listed as ADS/ADR: a USD listing price against
+    # local-currency (or differently ratioed ADS) statements produces
+    # meaningless ratios until unit reconciliation is verified.
+    is_foreign = (_text(row.get("country")) or "US").upper() != "US" or (
+        "foreign_private_issuer_review" in (row.get("provider_prefilter_flags") or [])
+    )
+    if is_foreign and _bool(row.get("unit_reconciliation_verified")) is not True:
+        blocking_review.append("unit_reconciliation_required")
+    # Unit-anomaly circuit breakers (any issuer): impossible "cheapness" is a
+    # suspected currency/ADS-unit mismatch, never deep value (QFIN: forward
+    # P/E 0.45x, FCF yield 94% from CNY EPS against a USD ADS price).
+    latest_actual_eps = _metric(row, "latest_actual_eps", "fy0_actual_eps")
+    unit_anomaly = bool(
+        (
+            forward_pe is not None
+            and 0 < forward_pe < float(config.get("minimum_plausible_forward_pe", 2.0))
+        )
+        or (
+            fcf_yield is not None
+            and fcf_yield > float(config.get("maximum_plausible_fcf_yield_pct", 50.0))
+        )
+        or (
+            price is not None
+            and price > 0
+            and latest_actual_eps is not None
+            and latest_actual_eps > 2.0 * price
+        )
+    )
+    if unit_anomaly:
+        hard_fail.append("unit_mismatch_suspected")
+
     if cyclicality > 2 and normalized_metric is None:
         nonblocking_review.append("mid_cycle_normalization_required")
         deep_dive_requirements.append("mid_cycle_normalization_required")

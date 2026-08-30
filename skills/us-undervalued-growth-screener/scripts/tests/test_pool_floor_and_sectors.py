@@ -67,9 +67,12 @@ class PoolFloorScopeTests(unittest.TestCase):
         self.assertTrue(audit["pool_adequate"])
         self.assertTrue(audit["pool_floor_waived"])
 
-    def test_missing_scope_keeps_legacy_waiver(self) -> None:
+    def test_missing_scope_fails_closed(self) -> None:
+        # Round-5 hardening: an unstated exhaustion scope proves nothing, so
+        # it no longer earns the legacy full waiver.
         _, audit = _build(minimum_pool=100, scope=None)
-        self.assertTrue(audit["pool_adequate"])
+        self.assertFalse(audit["pool_adequate"])
+        self.assertFalse(audit["pool_floor_waived"])
 
     def test_floor_met_needs_no_waiver(self) -> None:
         _, audit = _build(minimum_pool=2, scope="estimate_seed")
@@ -87,6 +90,9 @@ class SectorProfileInferenceTests(unittest.TestCase):
         ("Financial Services", "Business Development Company", "bdc"),
         ("Energy", "Oil & Gas MLP", "mlp"),
         ("Consumer Cyclical", "Auto & Truck Dealerships", "auto_dealership"),
+        ("Consumer Cyclical", "Auto - Dealerships", "auto_dealership"),
+        ("Financial Services", "Investment - Banking & Investment Services", "capital_markets"),
+        ("Financial Services", "Banks - Diversified", "bank"),
         ("Technology", "Software - Application", "general"),
         (None, None, "general"),
     ]
@@ -95,9 +101,16 @@ class SectorProfileInferenceTests(unittest.TestCase):
         for sector, industry, expected in self.CASES:
             with self.subTest(sector=sector, industry=industry):
                 self.assertEqual(PIPELINE.infer_sector_profile_type(sector, industry), expected)
-        # every non-general profile we emit must be one screen_universe gates on
-        emitted = {p for p, _ in PIPELINE.SECTOR_PROFILE_RULES}
-        self.assertTrue(emitted <= (SCREEN.SECTOR_PROFILES | {"auto_dealership"}))
+        # every BLOCKED profile we emit must be one screen_universe gates on;
+        # capital_markets and auto_dealership have their own handling.
+        emitted = (
+            set(PIPELINE.INDUSTRY_PROFILE_MAP.values())
+            | {profile for _, profile in PIPELINE._INDUSTRY_PREFIX_RULES}
+            | {"bdc", "mlp", "reit"}
+        )
+        self.assertTrue(
+            emitted <= (SCREEN.SECTOR_PROFILES | {"auto_dealership", "capital_markets"})
+        )
 
     def test_normalize_listing_carries_the_profile(self) -> None:
         row = {

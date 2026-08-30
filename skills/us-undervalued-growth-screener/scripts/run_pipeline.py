@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from build_provider_prefilter_pool import ALLOWED_LANES, _lane_score, build_pool
 from fmp_client import ApiCallBudgetExceeded, FMPClient
@@ -27,6 +28,9 @@ from normalize_estimates import apply_verified_actual_eps, normalize_symbol
 from screen_universe import DEFAULTS as SCREEN_DEFAULTS
 from screen_universe import _canonical_line, run_layered
 from skill_version import runtime_metadata
+
+# SEC filing acceptance timestamps (FMP acceptedDate) are US/Eastern wall time.
+SEC_FILING_TZ = ZoneInfo("America/New_York")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "min_market_cap": 500_000_000,
@@ -50,6 +54,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "provider_prefilter_minimum_pool": 12,
     "provider_prefilter_per_lane": 8,
     "max_deep_dive_candidates": 3,
+    # Symbol -> profile pins for names the listing-frame taxonomy cannot
+    # classify (e.g. BDCs filed under plain "Asset Management" whose name
+    # carries no BDC marker: {"ARCC": "bdc"}).
+    "sector_profile_overrides": {},
     "minimum_discovery_analyst_count": 2,
     "maximum_forward_eps_dispersion_pct": 100.0,
     "maximum_fy1_horizon_days": 430,
@@ -235,30 +243,67 @@ def is_common_stock(row: Mapping[str, Any]) -> bool:
     return symbol != "UNKNOWN"
 
 
-SECTOR_PROFILE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("reit", ("reit",)),
-    ("insurance", ("insurance",)),
-    ("bank", ("bank",)),
-    ("asset_manager", ("asset management",)),
-    ("bdc", ("business development", "bdc")),
-    ("mlp", ("mlp", "master limited partnership")),
-    ("auto_dealership", ("auto & truck dealership", "auto dealership", "truck dealership")),
+# Explicit map over normalized FMP taxonomy labels (lowercased, single-spaced).
+# Substring needles alone misroute real provider data: FMP's actual label is
+# "Auto - Dealerships" (which the old "auto & truck dealership" needle never
+# matched), and "Investment - Banking & Investment Services" is an
+# advisory/capital-markets business, not a deposit bank valued on P/TBV and
+# deposit betas.
+INDUSTRY_PROFILE_MAP: dict[str, str] = {
+    "auto - dealerships": "auto_dealership",
+    "auto & truck dealerships": "auto_dealership",
+    "investment - banking & investment services": "capital_markets",
+    "financial - capital markets": "capital_markets",
+    "capital markets": "capital_markets",
+}
+# Prefix rules over FMP's "Family - Subtype" industry labels.
+_INDUSTRY_PREFIX_RULES: tuple[tuple[str, str], ...] = (
+    ("reit", "reit"),
+    ("banks", "bank"),
+    ("insurance", "insurance"),
+    ("business development", "bdc"),
+    ("asset management", "asset_manager"),
 )
+# FMP files most BDCs under "Asset Management"; the company name is the only
+# listing-frame signal. Best-effort — operators can pin the rest through the
+# sector_profile_overrides config map.
+_BDC_NAME_NEEDLES = ("business development", " bdc")
+_MLP_NEEDLES = (" master limited partnership", " mlp")
 
 
-def infer_sector_profile_type(sector: str | None, industry: str | None) -> str:
-    """Map sector/industry text onto screen_universe's sector-profile gates.
+def _normalize_taxonomy_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def infer_sector_profile_type(
+    sector: str | None, industry: str | None, company_name: str | None = None
+) -> str:
+    """Map provider taxonomy onto screen_universe's sector-profile gates.
 
     Names whose standard company multiples are not comparable (mortgage REITs,
     insurers, banks, asset managers, BDCs, MLPs, auto dealers) must reach the
     broad screen tagged so that, absent sector-specific valuation evidence,
     they are routed to ``sector_specific_valuation_required`` instead of being
     scored (or excluded) on general-company metrics such as net debt/EBITDA.
+
+    ``capital_markets`` (advisory / investment banking) is deliberately NOT a
+    blocked sector profile: those firms are valued on ordinary earnings
+    multiples — the label exists so they are never misrouted as deposit banks.
     """
-    text = f"{sector or ''} {industry or ''}".lower()
-    for profile, needles in SECTOR_PROFILE_RULES:
-        if any(needle in text for needle in needles):
+    industry_norm = _normalize_taxonomy_text(industry)
+    name_norm = f" {_normalize_taxonomy_text(company_name)} "
+    if any(needle in name_norm for needle in _BDC_NAME_NEEDLES):
+        return "bdc"
+    if industry_norm in INDUSTRY_PROFILE_MAP:
+        return INDUSTRY_PROFILE_MAP[industry_norm]
+    for prefix, profile in _INDUSTRY_PREFIX_RULES:
+        if industry_norm.startswith(prefix):
             return profile
+    text = f" {_normalize_taxonomy_text(sector)} {industry_norm}{name_norm}"
+    if any(needle in text for needle in _MLP_NEEDLES):
+        return "mlp"
+    if " reit " in f"{text} ":
+        return "reit"
     return "general"
 
 
@@ -285,7 +330,9 @@ def normalize_listing(row: Mapping[str, Any], exchange: str) -> dict[str, Any] |
         "currency": _text(row.get("currency")),
         "country": _text(row.get("country")),
         "sector_profile_type": infer_sector_profile_type(
-            _text(row.get("sector")), _text(row.get("industry"))
+            _text(row.get("sector")),
+            _text(row.get("industry")),
+            _text(row.get("companyName")) or _text(row.get("name")),
         ),
     }
 
@@ -830,6 +877,43 @@ def mark_sector_profile_exhaustion(
     return output
 
 
+def mark_unit_reconciliation_exhaustion(
+    rows: Sequence[Mapping[str, Any]], *, source_id: str
+) -> list[dict[str, Any]]:
+    """Declare exhaustion for foreign issuers the direct-FMP path cannot reconcile.
+
+    A non-US issuer's USD listing price and local-currency (or differently
+    ratioed ADS) statements make every valuation ratio meaningless until the
+    listing/statement currencies and the ordinary-shares-per-ADS ratio are
+    verified (QFIN: forward P/E 0.45x, FCF yield 94% — unit mismatch, not deep
+    value). The direct-FMP discovery path carries no such evidence, so the
+    ``unit_reconciliation_required`` blocking review would otherwise leave the
+    row ``needs_enrichment`` forever; declaring exhaustion lets
+    ``screen_universe`` resolve it as ``unavailable_after_enrichment`` —
+    audited, excluded from selection, open to manual reconciliation.
+    """
+    output: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        if _is_foreign_private_issuer(row) and row.get("unit_reconciliation_verified") is not True:
+            row.setdefault("enrichment_attempted", True)
+            row["enrichment_exhausted"] = True
+            row["enrichment_exhaustion_reason"] = (
+                "listing/statement currency and ADS-unit reconciliation is not "
+                "available from the direct-FMP discovery path"
+            )
+            sources = [
+                value
+                for value in (row.get("enrichment_source_ids") or [])
+                if isinstance(value, str) and value.strip()
+            ]
+            if source_id not in sources:
+                sources.append(source_id)
+            row["enrichment_source_ids"] = sources
+        output.append(row)
+    return output
+
+
 def _is_foreign_private_issuer(row: Mapping[str, Any]) -> bool:
     """Heuristic FPI flag: ISIN country prefix when available, else listing country."""
     isin = _text(row.get("isin"))
@@ -864,11 +948,15 @@ def _verified_annual_actual(
             continue
         try:
             end_dt = datetime.fromisoformat(period_end[:10]).replace(tzinfo=timezone.utc)
-            acc_dt = datetime.fromisoformat(accepted[:19].replace(" ", "T")).replace(
-                tzinfo=timezone.utc
-            )
+            acc_dt = datetime.fromisoformat(accepted[:19].replace(" ", "T"))
         except ValueError:
             continue
+        if acc_dt.tzinfo is None:
+            # FMP's acceptedDate is the SEC acceptance clock: US/Eastern.
+            # Treating "17:23:10" as UTC would read it as 13:23 ET and leak a
+            # filing 4-5 hours before it was actually public.
+            acc_dt = acc_dt.replace(tzinfo=SEC_FILING_TZ)
+        acc_dt = acc_dt.astimezone(timezone.utc)
         if end_dt > analysis_as_of or acc_dt > analysis_as_of:
             continue
         if best is None or period_end > best[0]:
@@ -1470,6 +1558,15 @@ def execute_pipeline(
     )
     if not universe_rows:
         raise ValueError("FMP company screener returned no normalized listing rows")
+    profile_overrides = {
+        str(key).upper(): str(value)
+        for key, value in (config.get("sector_profile_overrides") or {}).items()
+    }
+    if profile_overrides:
+        for row in universe_rows:
+            pinned = profile_overrides.get(str(row.get("symbol", "")).upper())
+            if pinned:
+                row["sector_profile_type"] = pinned
     _write_json(audit_dir / "listing-enumeration-audit.json", enumeration_audit)
 
     bulk_endpoints = dict(config.get("bulk_endpoints") or {})
@@ -1608,6 +1705,9 @@ def execute_pipeline(
     )
     _write_json(audit_dir / "quality-probe-audit.json", quality_probe_audit)
     normalized_estimates = mark_sector_profile_exhaustion(
+        normalized_estimates, source_id=quality_probe_source_id
+    )
+    normalized_estimates = mark_unit_reconciliation_exhaustion(
         normalized_estimates, source_id=quality_probe_source_id
     )
     # growth_pattern is fixed at normalization (consensus basis) and the probe

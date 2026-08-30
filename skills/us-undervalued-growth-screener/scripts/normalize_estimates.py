@@ -19,6 +19,11 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+# Provider publish/acceptance stamps without an explicit offset are US/Eastern
+# wall time (the SEC acceptance clock), not UTC.
+PROVIDER_PUBLISH_TZ = ZoneInfo("America/New_York")
 
 try:
     from skill_version import SKILL_VERSION, runtime_metadata
@@ -186,9 +191,18 @@ def _latest_actual_period(
         if not raw:
             return False
         try:
-            published = _parse_date(raw, "published_at")
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00").replace(" ", "T"))
         except ValueError:
+            # NormalizeError is a ValueError subclass; any unparsable stamp
+            # fails closed (treated as not yet published).
             return False
+        if parsed.tzinfo is None:
+            if len(raw.strip()) <= 10:
+                # A date-only publish stamp cannot prove intraday precedence:
+                # count it only once the whole publication day (ET) has passed.
+                parsed = parsed.replace(hour=23, minute=59, second=59)
+            parsed = parsed.replace(tzinfo=PROVIDER_PUBLISH_TZ)
+        published = parsed.astimezone(timezone.utc)
         return published <= analysis_as_of
 
     marked_actual = [
