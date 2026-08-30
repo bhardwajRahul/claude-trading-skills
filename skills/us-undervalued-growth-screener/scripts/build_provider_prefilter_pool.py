@@ -64,6 +64,20 @@ def _symbol(row: Mapping[str, Any]) -> str:
     return (_text(row.get("symbol")) or "UNKNOWN").upper()
 
 
+def _fcf_effective_pct(row: Mapping[str, Any]) -> float | None:
+    """SBC-adjusted FCF yield when the probe derived it, else the standard yield.
+
+    ``sbc_adjusted_fcf_yield_pct`` is computed by the quality probe on the
+    market-cap basis ((FCF - SBC) / market cap). A revenue-based SBC ratio is
+    never subtracted from a market-cap-based yield here: the denominators
+    differ and the result would be meaningless.
+    """
+    adjusted = _number(row.get("sbc_adjusted_fcf_yield_pct"))
+    if adjusted is not None:
+        return adjusted
+    return _number(row.get("fcf_yield_pct"))
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -129,6 +143,15 @@ def _lane_score(row: Mapping[str, Any], lane: str, *, analysis_as_of: str) -> fl
             + breadth
             - max(0.0, cyclicality - 3.0) * 2.0
         )
+    fcf_yield = _number(row.get("fcf_yield_pct"))
+    fcf_weight = {"core_garp": 1.0, "quality_near_miss": 1.0, "high_growth_exception": 0.5}.get(
+        lane, 0.0
+    )
+    if fcf_yield is not None and fcf_weight:
+        score += max(-5.0, min(fcf_yield, 15.0)) * fcf_weight
+    nd_ebitda = _number(row.get("net_debt_to_ebitda"))
+    if nd_ebitda is not None:
+        score -= min(10.0, max(0.0, nd_ebitda - 2.5) * 4.0)
     if eps_growth is not None and eps_growth > 100:
         score -= 15.0
     return round(score, 6)
@@ -146,6 +169,7 @@ def build_pool(
     requested_min_market_cap: float,
     requested_max_market_cap: float,
     provider_exhausted: bool,
+    provider_exhausted_scope: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not universe_rows:
         raise ValueError("universe is empty")
@@ -156,6 +180,7 @@ def build_pool(
     candidates: dict[str, dict[str, Any]] = {}
     lane_input_counts: dict[str, int] = {}
     invalid_liquidity: list[str] = []
+    fcf_prefilter_exclusions: list[dict[str, str]] = []
     for lane in sorted(ALLOWED_LANES):
         rows = [dict(row) for row in lane_rows.get(lane, [])]
         lane_input_counts[lane] = len(rows)
@@ -167,12 +192,40 @@ def build_pool(
             if liquidity.get("valid_for_screen") is not True:
                 invalid_liquidity.append(symbol)
                 continue
+
+            # Hard FCF-support floor: a quality-probe-resolved row with
+            # sub-1% (SBC-adjusted) FCF yield does not clear the prefilter
+            # for any lane except high_growth_exception, which is kept but
+            # tagged and penalized instead of dropped outright (an
+            # early-stage grower may legitimately run FCF-negative).
+            fcf_below_floor = bool(raw.get("quality_probe_resolved")) and (
+                (effective := _fcf_effective_pct(raw)) is not None and effective < 1.0
+            )
+            weak_fcf_flag = False
+            if fcf_below_floor and lane != "high_growth_exception":
+                fcf_prefilter_exclusions.append(
+                    {
+                        "symbol": symbol,
+                        "lane": lane,
+                        "reason": "fcf_yield_below_prefilter_floor",
+                    }
+                )
+                continue
+
             score = _lane_score(raw, lane, analysis_as_of=analysis_as_of)
+            if fcf_below_floor and lane == "high_growth_exception":
+                score = round(score - 10.0, 6)
+                weak_fcf_flag = True
+
             item = candidates.setdefault(symbol, dict(raw))
             item["symbol"] = symbol
             lanes = set(item.get("provider_prefilter_lanes") or [])
             lanes.add(lane)
             item["provider_prefilter_lanes"] = sorted(lanes)
+            if weak_fcf_flag:
+                flags = set(item.get("provider_prefilter_flags") or [])
+                flags.add("weak_fcf_support")
+                item["provider_prefilter_flags"] = sorted(flags)
             lane_scores = dict(item.get("provider_prefilter_lane_scores") or {})
             lane_scores[lane] = score
             item["provider_prefilter_lane_scores"] = lane_scores
@@ -256,6 +309,7 @@ def build_pool(
         for row in selected
     )
     valid = pool_adequate and lane_coverage_count >= 3 and selected_liquidity_valid
+    fcf_prefilter_excluded_symbols = sorted({item["symbol"] for item in fcf_prefilter_exclusions})
     audit = {
         "runtime": runtime_metadata(),
         "valid": valid,
@@ -273,7 +327,11 @@ def build_pool(
         "max_pool": max_pool,
         "minimum_pool": minimum_pool,
         "provider_exhausted": provider_exhausted,
+        "provider_exhausted_scope": provider_exhausted_scope,
         "pool_adequate": pool_adequate,
+        "fcf_prefilter_excluded_symbols": fcf_prefilter_excluded_symbols,
+        "fcf_prefilter_excluded_count": len(fcf_prefilter_excluded_symbols),
+        "fcf_prefilter_exclusions": fcf_prefilter_exclusions,
         "invalid_liquidity_symbols": sorted(set(invalid_liquidity)),
         "invalid_liquidity_excluded_count": len(set(invalid_liquidity)),
         "liquidity_validation": {
@@ -320,6 +378,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--requested-min-market-cap", type=float, default=500_000_000)
     parser.add_argument("--requested-max-market-cap", type=float, default=20_000_000_000)
     parser.add_argument("--provider-exhausted", action="store_true")
+    parser.add_argument("--provider-exhausted-scope")
     parser.add_argument("--version", action="store_true")
     return parser.parse_args(argv)
 
@@ -349,6 +408,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             requested_min_market_cap=args.requested_min_market_cap,
             requested_max_market_cap=args.requested_max_market_cap,
             provider_exhausted=args.provider_exhausted,
+            provider_exhausted_scope=args.provider_exhausted_scope,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}")

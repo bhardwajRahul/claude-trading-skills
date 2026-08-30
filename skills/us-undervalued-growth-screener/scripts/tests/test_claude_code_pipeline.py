@@ -230,6 +230,19 @@ class FakePipelineClient:
     def get_analyst_estimates(self, symbol, *, period="annual", limit=6):
         raise AssertionError("bulk estimate path should be used")
 
+    def get_key_metrics_ttm(self, symbol):
+        self.api_calls_made += 1
+        return [
+            {
+                "symbol": symbol,
+                "returnOnInvestedCapitalTTM": 0.16,
+                "freeCashFlowYieldTTM": 0.07,
+                "evToFreeCashFlowTTM": 14.0,
+                "netDebtToEBITDATTM": 1.2,
+                "stockBasedCompensationToRevenueTTM": 0.02,
+            }
+        ]
+
     def get_historical_prices(self, symbol, *, from_date, to_date):
         return [{"date": f"2026-08-{day:02d}", "volume": 500_000} for day in range(1, 25)]
 
@@ -273,7 +286,7 @@ class DirectPipelineTests(unittest.TestCase):
             )
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.summary["status"], "ready_for_underwriting")
-            self.assertEqual(result.summary["runtime"]["skill_version"], "3.6.0")
+            self.assertEqual(result.summary["runtime"]["skill_version"], "3.6.1")
             self.assertEqual(result.summary["estimate_acquisition_mode"], "analyst_estimates_bulk")
             self.assertTrue(result.summary["listing_enumeration_verified"])
             self.assertGreaterEqual(len(result.summary["selected_symbols"]), 1)

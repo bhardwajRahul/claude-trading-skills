@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 SKILL_NAME = "us-undervalued-growth-screener"
-SKILL_VERSION = "3.6.0"
+SKILL_VERSION = "3.6.1"
 SCHEMA_VERSION = 3
 CONTRACT_REVISION = "3.5"
 # Change this whenever contract semantics change. It intentionally differs from
 # the human version so stale/cached runtimes are detected in serialized audits.
-RUNTIME_FINGERPRINT = "ug-v3.6-claude-code-direct-fmp-20260829"
+RUNTIME_FINGERPRINT = "ug-v3.6.1-claude-code-direct-fmp-20260830"
 
 
 def runtime_metadata() -> dict[str, object]:

@@ -2,10 +2,10 @@
   "schema_version": 3,
   "runtime": {
     "skill_name": "us-undervalued-growth-screener",
-    "skill_version": "3.6.0",
+    "skill_version": "3.6.1",
     "schema_version": 3,
     "contract_revision": "3.5",
-    "runtime_fingerprint": "ug-v3.6-claude-code-direct-fmp-20260829"
+    "runtime_fingerprint": "ug-v3.6.1-claude-code-direct-fmp-20260830"
   },
   "generated_at": "2026-08-28T14:42:38.687447+00:00",
   "valid": true,

@@ -80,10 +80,10 @@ The broad-screen audit commits the selected set with a SHA-256 payload. Every se
   "schema_version": 3,
   "runtime": {
     "skill_name": "us-undervalued-growth-screener",
-    "skill_version": "3.6.0",
+    "skill_version": "3.6.1",
     "schema_version": 3,
     "contract_revision": "3.5",
-    "runtime_fingerprint": "ug-v3.6-claude-code-direct-fmp-20260829"
+    "runtime_fingerprint": "ug-v3.6.1-claude-code-direct-fmp-20260830"
   },
   "analysis_as_of": "ISO-8601 with timezone",
   "run_metadata": {
@@ -180,10 +180,10 @@ Market-rate expectation language such as “markets price hikes/cuts” requires
   "contract_revision": "3.5",
   "runtime": {
     "skill_name": "us-undervalued-growth-screener",
-    "skill_version": "3.6.0",
+    "skill_version": "3.6.1",
     "schema_version": 3,
     "contract_revision": "3.5",
-    "runtime_fingerprint": "ug-v3.6-claude-code-direct-fmp-20260829"
+    "runtime_fingerprint": "ug-v3.6.1-claude-code-direct-fmp-20260830"
   },
   "conclusion_scope": "full_listing_universe | provider_prefilter | stratified_discovery_pool | bounded_available_fundamentals | user_supplied",
   "generated_at": "ISO-8601",
@@ -669,3 +669,34 @@ A provider-prefilter pool records:
 ```
 
 A valid high-recall bounded pool normally has at least 30 rows and at least three represented lanes. `provider_exhausted=true` may waive the row floor, but not liquidity evidence or lane disclosure.
+
+### v3.6.1 discovery additions
+
+The discovery audit additionally carries:
+
+```json
+{
+  "provider_exhausted_scope": "estimate_seed",
+  "listing_provider_exhausted": true,
+  "estimate_seed_exhausted": true,
+  "economic_candidate_universe_exhausted": false,
+  "seed_audit": {
+    "seed_selection_basis": "stratified_liquidity_proxy",
+    "economic_metrics_available_for_seed": false,
+    "cell_count": 55,
+    "quota_method": "sqrt_hamilton",
+    "alphabetic_tie_break_used_count": 0,
+    "hash_tie_break_used_count": 3,
+    "seed_limit_configured": 180,
+    "seed_limit_effective": 180,
+    "reserved_calls": 130
+  },
+  "quality_probe": {"attempted": [], "resolved": [], "source_id": "fmp-key-metrics-ttm-<date>", "calls_used": 0},
+  "fcf_prefilter_excluded_symbols": [],
+  "fcf_prefilter_exclusions": [{"symbol": "AAA", "lane": "core_garp", "reason": "fcf_yield_below_prefilter_floor"}]
+}
+```
+
+`economic_candidate_universe_exhausted` is true only when bulk estimates covered the listing universe. Pool rows may carry `quality_probe_attempted`, `quality_probe_resolved`, `quality_probe_source_ids`, `sbc_adjusted_fcf_yield_pct`, `provider_prefilter_flags` (`weak_fcf_support`, `earnings_recovery`, `foreign_private_issuer_review`), and the growth-basis fields `latest_actual_eps`, `fy1_eps_below_latest_actual`, `current_year_growth_pct`, `eps_growth_actual_to_fy3_pct`, `growth_pattern`.
+
+`run-summary.json` / `NEXT_ACTION.json` add `listing_enumeration_complete`, `economic_screen_scope_complete`, `listing_universe_count`, `estimate_seed_count`, `estimate_seed_coverage_pct`, `valid_estimate_count`, `valid_estimate_coverage_pct`; `scope_complete` remains as a deprecated alias of listing-enumeration completeness. The contract-validated `screening_audit.scope` block is unchanged.

@@ -290,6 +290,7 @@ Both commands must exit `0`. Present the self-contained ZIP together with the re
 - `skills/us-undervalued-growth-screener/references/migration-v3.3-to-v3.4.md`
 - `skills/us-undervalued-growth-screener/references/migration-v3.4-to-v3.5.md`
 - `skills/us-undervalued-growth-screener/references/migration-v3.5-to-v3.6.md`
+- `skills/us-undervalued-growth-screener/references/migration-v3.6-to-v3.6.1.md`
 - `skills/us-undervalued-growth-screener/references/original-prompt-mapping.md`
 - `skills/us-undervalued-growth-screener/references/output-template.md`
 - `skills/us-undervalued-growth-screener/references/research-checklist.md`

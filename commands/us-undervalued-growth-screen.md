@@ -22,7 +22,7 @@ Interpretation:
 ## Execution
 
 1. Confirm that `FMP_API_KEY` exists without printing its value.
-2. Run the runtime preflight, including `run_pipeline.py --version`. Every helper must report skill 3.6.0, schema 3, contract 3.5, and fingerprint `ug-v3.6-claude-code-direct-fmp-20260829`.
+2. Run the runtime preflight, including `run_pipeline.py --version`. Every helper must report skill 3.6.1, schema 3, contract 3.5, and fingerprint `ug-v3.6.1-claude-code-direct-fmp-20260830`.
 3. Run:
 
 ```bash

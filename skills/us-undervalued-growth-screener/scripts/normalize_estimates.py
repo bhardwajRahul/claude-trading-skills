@@ -140,6 +140,9 @@ def _period_record(row: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     fiscal_year = _text(row.get("fiscalYear")) or _text(row.get("fiscal_year")) or str(end.year)
     fiscal_year = fiscal_year.upper().removeprefix("FY")
+    is_actual = (
+        _bool(row.get("isActual")) or _bool(row.get("is_actual")) or _bool(row.get("actual"))
+    )
     return {
         "fiscal_year": fiscal_year,
         "period": f"FY{fiscal_year}",
@@ -152,7 +155,51 @@ def _period_record(row: Mapping[str, Any]) -> dict[str, Any] | None:
         or _integer(row.get("num_analysts_eps")),
         "revenue_analyst_count": _integer(row.get("numAnalystsRevenue"))
         or _integer(row.get("num_analysts_revenue")),
+        "is_actual": bool(is_actual),
     }
+
+
+def _latest_actual_period(
+    periods: Sequence[Mapping[str, Any]], analysis_as_of: datetime
+) -> Mapping[str, Any] | None:
+    """Return the period record representing the most recent actual annual EPS.
+
+    Prefers rows the provider explicitly marks as actuals; falls back to the
+    most recent period whose period_end is on/before ``analysis_as_of`` (the
+    provider's own trailing FY0 estimate row, which is the closest available
+    proxy for the reported actual). Returns None when neither is available.
+    """
+    marked_actual = [record for record in periods if record.get("is_actual")]
+    if marked_actual:
+        return max(marked_actual, key=lambda record: str(record["period_end"]))
+    past = [
+        record
+        for record in periods
+        if _parse_date(record["period_end"], "period_end") <= analysis_as_of
+    ]
+    if past:
+        return max(past, key=lambda record: str(record["period_end"]))
+    return None
+
+
+def _growth_pattern(
+    latest_actual_eps: float | None,
+    fy1_eps: float | None,
+    fy3_eps: float | None,
+    early_growth_pct: float | None,
+    late_growth_pct: float | None,
+) -> str:
+    if latest_actual_eps is None or latest_actual_eps <= 0:
+        return "unknown"
+    if fy1_eps is not None and fy3_eps is not None:
+        if fy1_eps < latest_actual_eps and fy3_eps > latest_actual_eps:
+            return "trough_recovery"
+        if fy3_eps < latest_actual_eps:
+            return "declining"
+    if early_growth_pct is not None and late_growth_pct is not None:
+        if late_growth_pct > early_growth_pct + 1e-9:
+            return "accelerating"
+    return "steady"
 
 
 def _dispersion_pct(avg: float | None, low: float | None, high: float | None) -> float | None:
@@ -263,6 +310,68 @@ def normalize_symbol(
         growth_years,
     )
 
+    # Growth-basis diagnostics (v3.6.1): compare the forward estimate path to
+    # the latest actual annual EPS so a trough-recovery FY1->FY3 CAGR (a
+    # current-year decline masked by an eventual rebound, e.g. YELP FY26E
+    # below FY25 actual) is visible rather than silently blended away.
+    latest_actual_period = _latest_actual_period(periods, analysis_as_of)
+    latest_actual_eps = (
+        _number(latest_actual_period.get("eps_avg")) if latest_actual_period else None
+    )
+    latest_actual_period_end = (
+        latest_actual_period.get("period_end") if latest_actual_period else None
+    )
+    fy1_raw_eps = _number(fy1.get("eps_avg")) if fy1 else None
+    growth_end_raw_eps = _number(growth_end.get("eps_avg")) if growth_end else None
+    has_positive_actual = latest_actual_eps is not None and latest_actual_eps > 0
+
+    fy1_eps_below_latest_actual = (
+        fy1_raw_eps < latest_actual_eps if has_positive_actual and fy1_raw_eps is not None else None
+    )
+    current_year_growth_pct = (
+        (fy1_raw_eps / latest_actual_eps - 1.0) * 100.0
+        if has_positive_actual and fy1_raw_eps is not None
+        else None
+    )
+    actual_to_growth_end_years = 0.0
+    if latest_actual_period is not None and growth_end is not None:
+        actual_to_growth_end_years = (
+            _parse_date(growth_end["period_end"], "growth_end.period_end")
+            - _parse_date(latest_actual_period["period_end"], "latest_actual.period_end")
+        ).days / 365.25
+    eps_growth_actual_to_fy3 = (
+        _cagr(latest_actual_eps, growth_end_raw_eps, actual_to_growth_end_years)
+        if has_positive_actual
+        else None
+    )
+
+    fy2 = future[1] if len(future) >= 2 else None
+    early_growth_pct = None
+    late_growth_pct = None
+    if fy1 and fy2:
+        early_years = (
+            _parse_date(fy2["period_end"], "fy2.period_end")
+            - _parse_date(fy1["period_end"], "fy1.period_end")
+        ).days / 365.25
+        early_growth_pct = _cagr(fy1_raw_eps, _number(fy2.get("eps_avg")), early_years)
+    if len(future) >= 3:
+        fy3 = future[2]
+        late_years = (
+            _parse_date(fy3["period_end"], "fy3.period_end")
+            - _parse_date(fy2["period_end"], "fy2.period_end")
+        ).days / 365.25
+        late_growth_pct = _cagr(
+            _number(fy2.get("eps_avg")), _number(fy3.get("eps_avg")), late_years
+        )
+
+    growth_pattern = _growth_pattern(
+        latest_actual_eps,
+        fy1_raw_eps,
+        growth_end_raw_eps,
+        early_growth_pct,
+        late_growth_pct,
+    )
+
     status = "valid" if not reasons else "unavailable"
     canonical_forward_eps = forward_eps if status == "valid" else None
     canonical_forward_pe = forward_pe if status == "valid" else None
@@ -313,6 +422,24 @@ def normalize_symbol(
             "eps_growth_pct": round(eps_growth, 6)
             if eps_growth is not None and status == "valid"
             else None,
+            # v3.6.1 alias: identical semantics to eps_growth_pct (FY1->FY3
+            # CAGR), kept under an explicit name alongside eps_growth_actual_to_fy3_pct.
+            "eps_growth_fy1_to_fy3_pct": round(eps_growth, 6)
+            if eps_growth is not None and status == "valid"
+            else None,
+            "latest_actual_eps": round(latest_actual_eps, 6)
+            if latest_actual_eps is not None
+            else None,
+            "latest_actual_period_end": latest_actual_period_end,
+            "fy1_eps_below_latest_actual": fy1_eps_below_latest_actual,
+            "current_year_growth_pct": round(current_year_growth_pct, 6)
+            if current_year_growth_pct is not None
+            else None,
+            "eps_growth_actual_to_fy3_pct": round(eps_growth_actual_to_fy3, 6)
+            if eps_growth_actual_to_fy3 is not None
+            else None,
+            "growth_pattern": growth_pattern,
+            "growth_basis_source_ids": list(source_ids),
             "revenue_growth_pct": round(revenue_growth, 6)
             if revenue_growth is not None and status == "valid"
             else None,

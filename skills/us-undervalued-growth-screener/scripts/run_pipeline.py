@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from build_provider_prefilter_pool import ALLOWED_LANES, build_pool
+from build_provider_prefilter_pool import ALLOWED_LANES, _lane_score, build_pool
 from fmp_client import ApiCallBudgetExceeded, FMPClient
 from normalize_estimates import normalize_symbol
 from screen_universe import DEFAULTS as SCREEN_DEFAULTS
@@ -40,7 +40,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "maximum_market_cap_band_depth": 12,
     "bulk_estimate_years": 5,
     "bulk_estimate_minimum_coverage_pct": 20.0,
-    "pre_enrichment_limit": 80,
+    "pre_enrichment_limit": 180,
+    "seed_limit_cap": 200,
+    "quality_probe_limit": 35,
+    "candidate_packet_reserve_calls": 30,
+    "retry_reserve_calls": 25,
     "exact_liquidity_limit": 40,
     "provider_prefilter_pool_size": 30,
     "provider_prefilter_minimum_pool": 12,
@@ -99,7 +103,6 @@ CYCLICAL_RULES: tuple[tuple[int, tuple[str, ...]], ...] = (
     (
         4,
         (
-            "semiconductor",
             "chemical",
             "mining",
             "oil & gas",
@@ -113,6 +116,17 @@ CYCLICAL_RULES: tuple[tuple[int, tuple[str, ...]], ...] = (
             "agricultural",
             "farm products",
             "meat products",
+            "gold",
+            "silver",
+            "precious metal",
+            "base metal",
+            "copper",
+            "uranium",
+            "coal",
+            "metals & mining",
+            "metals and mining",
+            "metal mining",
+            "mineral",
         ),
     ),
     (
@@ -130,6 +144,8 @@ CYCLICAL_RULES: tuple[tuple[int, tuple[str, ...]], ...] = (
             "railroad",
             "construction",
             "consumer cyclical",
+            "aluminum",
+            "semiconductor equipment",
         ),
     ),
 )
@@ -520,34 +536,311 @@ def pre_enrichment_score(row: Mapping[str, Any]) -> float:
     volume = _first_number(row, "volume") or 0.0
     price = _first_number(row, "price") or 0.0
     if volume > 0 and price > 0:
-        score += min(8.0, math.log10(max(volume * price, 1.0)))
+        # Uncapped: this is a ranking key for seed/liquidity selection, not a
+        # bounded score, so large-cap/high-volume names must not tie here.
+        score += math.log10(max(volume * price, 1.0))
     return round(score, 6)
 
 
-def diversified_seed(rows: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
+def _cell_key(row: Mapping[str, Any]) -> tuple[str, str]:
+    sector = (_text(row.get("sector")) or "Unknown").lower()
+    cap = _first_number(row, "market_cap") or 0.0
+    return sector, market_cap_bucket(cap)
+
+
+def _stable_tie_break(symbol: str, run_salt: str) -> str:
+    return hashlib.sha256(f"{run_salt}:{symbol}".encode()).hexdigest()
+
+
+def _apportion_quota(
+    sizes: Mapping[tuple[str, str], int], limit: int
+) -> dict[tuple[str, str], int]:
+    """Hamilton (largest-remainder) apportionment of ``limit`` seats across cells.
+
+    Every non-empty cell gets at least one seat (capped by its own size);
+    weight is ``sqrt(cell size)`` so large cells still get proportionally
+    more seats without a single mega-cell crowding out everything else.
+    Deterministic and independent of dict/cell iteration order.
+    """
+    keys = sorted(sizes)
+    if not keys:
+        return {}
+    if limit < len(keys):
+        ordered = sorted(keys, key=lambda key: (-sizes[key], key))
+        chosen = set(ordered[:limit])
+        return {key: (1 if key in chosen else 0) for key in keys}
+
+    weights = {key: math.sqrt(max(sizes[key], 1)) for key in keys}
+    total_weight = sum(weights.values()) or 1.0
+    ideal = {key: weights[key] / total_weight * limit for key in keys}
+    counts = {key: min(sizes[key], max(1, int(math.floor(ideal[key])))) for key in keys}
+
+    allocated = sum(counts.values())
+    remainder = limit - allocated
+    if remainder > 0:
+        # Largest fractional remainder first; skip cells already at capacity.
+        by_fraction = sorted(keys, key=lambda key: (-(ideal[key] - math.floor(ideal[key])), key))
+        while remainder > 0:
+            progressed = False
+            for key in by_fraction:
+                if remainder <= 0:
+                    break
+                if counts[key] < sizes[key]:
+                    counts[key] += 1
+                    remainder -= 1
+                    progressed = True
+            if not progressed:
+                break
+    elif remainder < 0:
+        # Defensive: only reachable if the min-1-per-cell floor overshot the
+        # limit while sizes still permitted trimming (rare, tiny-cell case).
+        by_excess = sorted(keys, key=lambda key: (-(counts[key] - 1), key))
+        idx = 0
+        while remainder < 0 and idx < len(by_excess) * 4:
+            key = by_excess[idx % len(by_excess)]
+            if counts[key] > 1:
+                counts[key] -= 1
+                remainder += 1
+            idx += 1
+    return counts
+
+
+_ECONOMIC_SEED_FIELDS = ("eps_growth_pct", "revenue_growth_pct", "roic_pct", "fcf_yield_pct")
+
+
+def diversified_seed(
+    rows: Sequence[Mapping[str, Any]],
+    limit: int,
+    *,
+    run_salt: str,
+    seed_limit_configured: int | None = None,
+    reserved_calls: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Stratified sector x market-cap seed selection for the estimate fallback path.
+
+    Replaces the prior dict-order round-robin (which biased the tail of the
+    seed toward alphabetically-early cells) with a deterministic
+    sqrt-weighted Hamilton apportionment and a within-cell ranking that never
+    falls back to the raw ticker string.
+    """
     cells: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for raw in rows:
         row = dict(raw)
-        sector = (_text(row.get("sector")) or "Unknown").lower()
-        cap = _first_number(row, "market_cap") or 0.0
-        cells[(sector, market_cap_bucket(cap))].append(row)
-    for values in cells.values():
-        values.sort(key=lambda row: (-pre_enrichment_score(row), _symbol(row)))
+        cells[_cell_key(row)].append(row)
+
+    sizes = {key: len(values) for key, values in cells.items()}
+    quotas = _apportion_quota(sizes, limit)
+
+    hash_tie_break_used_count = 0
     selected: list[dict[str, Any]] = []
-    depth = 0
-    while len(selected) < limit:
-        added = False
-        for cell in sorted(cells):
-            values = cells[cell]
-            if depth < len(values):
-                selected.append(values[depth])
-                added = True
-                if len(selected) >= limit:
-                    break
-        if not added:
-            break
-        depth += 1
-    return selected
+    for key in sorted(cells):
+        values = cells[key]
+
+        def _sort_key(row: Mapping[str, Any]) -> tuple[float, float, float, int, str]:
+            price = _first_number(row, "price") or 0.0
+            volume = _first_number(row, "volume") or 0.0
+            dollar_volume = price * volume
+            market_cap = _first_number(row, "market_cap") or 0.0
+            missing = sum(1 for field in ("price", "volume") if _first_number(row, field) is None)
+            return (
+                -pre_enrichment_score(row),
+                -dollar_volume,
+                -market_cap,
+                missing,
+                _stable_tie_break(_symbol(row), run_salt),
+            )
+
+        values.sort(key=_sort_key)
+        quota = quotas.get(key, 0)
+        # Count ties across the whole ranked cell (not just the chosen slice):
+        # the hash decides ordering at the selection boundary too, so a tie
+        # straddling `quota` still used the hash even though only one side
+        # of it was kept.
+        for idx in range(1, len(values)):
+            base_prev = _sort_key(values[idx - 1])[:-1]
+            base_cur = _sort_key(values[idx])[:-1]
+            if base_prev == base_cur:
+                hash_tie_break_used_count += 1
+        selected.extend(values[:quota])
+
+    economic_rows_with_data = sum(
+        1
+        for raw in rows
+        if any(_first_number(raw, field) is not None for field in _ECONOMIC_SEED_FIELDS)
+    )
+    economic_metrics_available_for_seed = bool(rows) and (
+        economic_rows_with_data / len(rows) >= 0.5
+    )
+    seed_audit = {
+        "seed_selection_basis": (
+            "stratified_economic_score"
+            if economic_metrics_available_for_seed
+            else "stratified_liquidity_proxy"
+        ),
+        "economic_metrics_available_for_seed": economic_metrics_available_for_seed,
+        "cell_count": len(cells),
+        "quota_method": "sqrt_hamilton",
+        "alphabetic_tie_break_used_count": 0,
+        "hash_tie_break_used_count": hash_tie_break_used_count,
+        "seed_limit_configured": seed_limit_configured
+        if seed_limit_configured is not None
+        else limit,
+        "seed_limit_effective": limit,
+        "reserved_calls": reserved_calls if reserved_calls is not None else 0,
+    }
+    return selected, seed_audit
+
+
+def compute_effective_seed_limit(
+    *,
+    pre_enrichment_limit: int,
+    seed_limit_cap: int,
+    max_api_calls: int,
+    api_calls_made: int,
+    quality_probe_limit: int,
+    exact_liquidity_limit: int,
+    candidate_packet_reserve_calls: int,
+    retry_reserve_calls: int,
+) -> int:
+    """Bound the per-symbol estimate fallback seed by the remaining call budget.
+
+    Reserves calls for the quality probe, exact-liquidity lookups, candidate
+    packet generation, and retries so the seed step cannot starve the rest of
+    the pipeline. Raises ``ValueError`` (caught by the existing failure-JSON
+    path in ``main``) when the remaining budget cannot afford a floor of 20
+    seeds -- silently truncating below that floor would make the discovery
+    pool too thin to be meaningful.
+    """
+    reserved = (
+        int(quality_probe_limit)
+        + int(exact_liquidity_limit)
+        + int(candidate_packet_reserve_calls)
+        + int(retry_reserve_calls)
+    )
+    remaining = int(max_api_calls) - int(api_calls_made)
+    effective = min(int(pre_enrichment_limit), int(seed_limit_cap), remaining - reserved)
+    if effective < 20:
+        raise ValueError(
+            "estimate seed budget insufficient: effective_limit="
+            f"{effective} < 20 (pre_enrichment_limit={pre_enrichment_limit}, "
+            f"seed_limit_cap={seed_limit_cap}, remaining_calls={remaining}, "
+            f"reserved_calls={reserved})"
+        )
+    return effective
+
+
+def _is_foreign_private_issuer(row: Mapping[str, Any]) -> bool:
+    """Heuristic FPI flag: ISIN country prefix when available, else listing country."""
+    isin = _text(row.get("isin"))
+    if isin:
+        return not isin.upper().startswith("US")
+    country = _text(row.get("country"))
+    if country:
+        return country.upper() != "US"
+    return False
+
+
+def apply_quality_probe(
+    client: Any,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    target_symbols: Sequence[str],
+    source_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Enrich the top-ranked lane candidates with TTM quality metrics.
+
+    A failed/empty probe (4xx or no data) is recorded as
+    ``quality_probe_resolved: False`` on that row rather than failing the run.
+    """
+    targets = {str(value).upper() for value in target_symbols}
+    attempted: list[str] = []
+    resolved: list[str] = []
+    output: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        symbol = _symbol(row)
+        if symbol in targets:
+            attempted.append(symbol)
+            row["quality_probe_attempted"] = True
+            payload = client.get_key_metrics_ttm(symbol)
+            bundle = payload[0] if payload else None
+            if isinstance(bundle, Mapping):
+                roic = _first_number(bundle, "returnOnInvestedCapitalTTM")
+                fcf_yield = _first_number(bundle, "freeCashFlowYieldTTM")
+                ev_to_fcf = _first_number(bundle, "evToFreeCashFlowTTM")
+                nd_ebitda = _first_number(bundle, "netDebtToEBITDATTM")
+                sbc = _first_number(bundle, "stockBasedCompensationToRevenueTTM")
+                if roic is not None:
+                    row["roic_pct"] = roic * 100.0
+                if fcf_yield is not None:
+                    row["fcf_yield_pct"] = fcf_yield * 100.0
+                if ev_to_fcf is not None:
+                    row["ev_to_fcf"] = ev_to_fcf
+                if nd_ebitda is not None:
+                    row["net_debt_to_ebitda"] = nd_ebitda
+                if sbc is not None:
+                    row["sbc_revenue_pct"] = sbc * 100.0
+                # SBC-adjusted FCF yield on the SAME denominator as fcf_yield
+                # (market cap): (FCF - SBC) / mktcap = fcf_yield - SBC/revenue * revenue/mktcap,
+                # with revenue recovered from EV / (EV/Sales). Never subtract a
+                # revenue-based ratio from a market-cap-based yield directly.
+                ev = _first_number(bundle, "enterpriseValueTTM")
+                ev_to_sales = _first_number(bundle, "evToSalesTTM")
+                market_cap = _first_number(row, "market_cap")
+                if (
+                    fcf_yield is not None
+                    and sbc is not None
+                    and ev is not None
+                    and ev_to_sales
+                    and market_cap
+                ):
+                    revenue = ev / ev_to_sales
+                    row["sbc_adjusted_fcf_yield_pct"] = (
+                        fcf_yield - sbc * revenue / market_cap
+                    ) * 100.0
+                row["quality_probe_source_ids"] = [source_id]
+                row["quality_probe_resolved"] = True
+                resolved.append(symbol)
+            else:
+                row["quality_probe_resolved"] = False
+        else:
+            row.setdefault("quality_probe_attempted", False)
+            row.setdefault("quality_probe_resolved", False)
+        output.append(row)
+    audit = {
+        "attempted": attempted,
+        "resolved": resolved,
+        "symbols": attempted,
+        "source_id": source_id,
+        "calls_used": len(attempted),
+    }
+    return output, audit
+
+
+def _best_lane_score(row: Mapping[str, Any], lanes: Sequence[str], *, analysis_as_of: str) -> float:
+    if not lanes:
+        return float("-inf")
+    return max(_lane_score(row, lane, analysis_as_of=analysis_as_of) for lane in lanes)
+
+
+def select_quality_probe_targets(
+    rows: Sequence[Mapping[str, Any]],
+    lane_membership_map: Mapping[str, Sequence[str]],
+    *,
+    limit: int,
+    analysis_as_of: str,
+) -> list[str]:
+    """Rank the union of lane rows by best lane score; return the top ``limit`` symbols."""
+    ranked = sorted(
+        (row for row in rows if lane_membership_map.get(_symbol(row))),
+        key=lambda row: (
+            -_best_lane_score(
+                row, lane_membership_map.get(_symbol(row), []), analysis_as_of=analysis_as_of
+            ),
+            _symbol(row),
+        ),
+    )
+    return [_symbol(row) for row in ranked[:limit]]
 
 
 def prior_business_days(as_of: date, count: int) -> list[date]:
@@ -746,7 +1039,17 @@ def lane_memberships(row: Mapping[str, Any], config: Mapping[str, Any]) -> list[
             and growth >= float(config["near_miss_min_per_share_growth_pct"])
         ):
             lanes.append("cyclical_normalization")
-    return sorted(set(lanes))
+
+    # Trough-recovery names (FY1 dips below the latest actual before FY3
+    # recovers) show a headline FY1->FY3 CAGR that masks a current-year
+    # decline; they do not belong in core_garp but remain visible for
+    # deep-dive review.
+    growth_pattern = _text(row.get("growth_pattern"))
+    lane_set = set(lanes)
+    if growth_pattern == "trough_recovery" and "core_garp" in lane_set:
+        lane_set.discard("core_garp")
+        lane_set.add("quality_near_miss")
+    return sorted(lane_set)
 
 
 def compact_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -851,6 +1154,18 @@ def build_fmp_packet(client: FMPClient, row: Mapping[str, Any], output_dir: Path
         target = raw_dir / f"{name}.json"
         _write_json(target, payload)
         evidence_paths[name] = str(target.relative_to(output_dir.parent))
+
+    required_next_checks = [
+        "corporate_action_preflight",
+        "accession_specific_sec_or_official_ir_verification",
+        "quarter_and_full_year_period_separation",
+        "standard_fcf_primary_source_reconstruction",
+        "independent_forecast_bridge",
+        "peer_basis_alignment",
+        "sector_and_cycle_normalization",
+    ]
+    if "foreign_private_issuer_review" in (row.get("provider_prefilter_flags") or []):
+        required_next_checks.append("form_20f_6k_verification")
 
     income_fields = (
         "date",
@@ -957,15 +1272,7 @@ def build_fmp_packet(client: FMPClient, row: Mapping[str, Any], output_dir: Path
         "ratios_ttm": dict(ratios_ttm[0]) if ratios_ttm else None,
         "peer_symbols": peers[:10],
         "raw_evidence_paths": evidence_paths,
-        "required_next_checks": [
-            "corporate_action_preflight",
-            "accession_specific_sec_or_official_ir_verification",
-            "quarter_and_full_year_period_separation",
-            "standard_fcf_primary_source_reconstruction",
-            "independent_forecast_bridge",
-            "peer_basis_alignment",
-            "sector_and_cycle_normalization",
-        ],
+        "required_next_checks": required_next_checks,
     }
     path = output_dir / f"{symbol}.fmp-packet.json"
     _write_json(path, packet)
@@ -1047,12 +1354,36 @@ def execute_pipeline(
     use_bulk_estimates = bool(
         bulk_estimates and bulk_coverage >= float(config["bulk_estimate_minimum_coverage_pct"])
     )
+    seed_audit: dict[str, Any] | None = None
     if use_bulk_estimates:
         estimate_frame = [row for row in enriched_universe if _symbol(row) in bulk_estimates]
         estimates_by_symbol = bulk_estimates
         estimate_acquisition_mode = "analyst_estimates_bulk"
     else:
-        estimate_frame = diversified_seed(enriched_universe, int(config["pre_enrichment_limit"]))
+        pre_enrichment_limit = int(config["pre_enrichment_limit"])
+        effective_seed_limit = compute_effective_seed_limit(
+            pre_enrichment_limit=pre_enrichment_limit,
+            seed_limit_cap=int(config["seed_limit_cap"]),
+            max_api_calls=int(client.max_api_calls),
+            api_calls_made=int(client.api_calls_made),
+            quality_probe_limit=int(config["quality_probe_limit"]),
+            exact_liquidity_limit=int(config["exact_liquidity_limit"]),
+            candidate_packet_reserve_calls=int(config["candidate_packet_reserve_calls"]),
+            retry_reserve_calls=int(config["retry_reserve_calls"]),
+        )
+        estimate_frame, seed_audit = diversified_seed(
+            enriched_universe,
+            effective_seed_limit,
+            run_salt=analysis_as_of.date().isoformat(),
+            seed_limit_configured=pre_enrichment_limit,
+            reserved_calls=(
+                int(config["quality_probe_limit"])
+                + int(config["exact_liquidity_limit"])
+                + int(config["candidate_packet_reserve_calls"])
+                + int(config["retry_reserve_calls"])
+            ),
+        )
+        _write_json(audit_dir / "seed-audit.json", seed_audit)
         estimates_by_symbol: dict[str, list[dict[str, Any]]] = {}
         for row in estimate_frame:
             symbol = _symbol(row)
@@ -1089,12 +1420,48 @@ def execute_pipeline(
 
     seed = estimate_frame
     universe_sha = _write_jsonl(audit_dir / "universe.jsonl", enriched_universe)
+
+    # Quality probe (v3.6.1): rank the union of lane candidates by best lane
+    # score and pull TTM quality metrics (ROIC, FCF yield, EV/FCF, leverage,
+    # SBC/revenue) for the top slice before pool selection, so FCF-negative
+    # candidates like a 126x-EV/FCF miss can be screened out ahead of the
+    # deep-dive step instead of consuming one of its slots.
+    lane_membership_map = {
+        _symbol(row): lane_memberships(row, config) for row in normalized_estimates
+    }
+    quality_probe_limit = int(config["quality_probe_limit"])
+    quality_probe_targets = select_quality_probe_targets(
+        normalized_estimates,
+        lane_membership_map,
+        limit=quality_probe_limit,
+        analysis_as_of=analysis_as_of.isoformat(),
+    )
+    quality_probe_source_id = f"fmp-key-metrics-ttm-{analysis_as_of.date().isoformat()}"
+    normalized_estimates, quality_probe_audit = apply_quality_probe(
+        client,
+        normalized_estimates,
+        target_symbols=quality_probe_targets,
+        source_id=quality_probe_source_id,
+    )
+    _write_json(audit_dir / "quality-probe-audit.json", quality_probe_audit)
+
     enriched_sha = _write_jsonl(audit_dir / "enriched-estimates.jsonl", normalized_estimates)
 
     lanes: dict[str, list[dict[str, Any]]] = {lane: [] for lane in ALLOWED_LANES}
     for row in normalized_estimates:
-        for lane in lane_memberships(row, config):
-            lanes[lane].append(dict(row))
+        symbol = _symbol(row)
+        growth_pattern = _text(row.get("growth_pattern"))
+        is_fpi = _is_foreign_private_issuer(row)
+        for lane in lane_membership_map.get(symbol, []):
+            copy = dict(row)
+            flags = set(copy.get("provider_prefilter_flags") or [])
+            if growth_pattern == "trough_recovery":
+                flags.add("earnings_recovery")
+            if is_fpi:
+                flags.add("foreign_private_issuer_review")
+            if flags:
+                copy["provider_prefilter_flags"] = sorted(flags)
+            lanes[lane].append(copy)
     for lane, rows in lanes.items():
         _write_jsonl(audit_dir / f"lane-{lane}.jsonl", rows)
 
@@ -1109,6 +1476,7 @@ def execute_pipeline(
         requested_min_market_cap=min_cap,
         requested_max_market_cap=max_cap,
         provider_exhausted=True,
+        provider_exhausted_scope="estimate_seed",
     )
     pool_sha = _write_jsonl(audit_dir / "provider-prefilter-pool.jsonl", pool)
     discovery_audit.update(
@@ -1120,8 +1488,15 @@ def execute_pipeline(
             "estimate_acquisition_mode": estimate_acquisition_mode,
             "bulk_estimate_audit": bulk_estimate_audit,
             "exact_liquidity_target_count": len(liquidity_targets),
+            "quality_probe": quality_probe_audit,
+            "listing_provider_exhausted": True,
+            "estimate_seed_exhausted": True,
+            "economic_candidate_universe_exhausted": estimate_acquisition_mode
+            == "analyst_estimates_bulk",
         }
     )
+    if seed_audit is not None:
+        discovery_audit["seed_audit"] = seed_audit
     _write_json(audit_dir / "provider-prefilter-audit.json", discovery_audit)
 
     screen_config = dict(SCREEN_DEFAULTS)
@@ -1184,6 +1559,25 @@ def execute_pipeline(
         for symbol in selected:
             packet_paths.append(str(build_fmp_packet(client, selected_rows[symbol], packet_dir)))
 
+    listing_universe_count = len(enriched_universe)
+    estimate_seed_count = len(seed)
+    estimate_seed_coverage_pct = (
+        estimate_seed_count / listing_universe_count * 100.0 if listing_universe_count else 0.0
+    )
+    valid_estimate_count = sum(
+        1
+        for row in normalized_estimates
+        if str(row.get("estimate_normalization_status") or "") == "valid"
+    )
+    valid_estimate_coverage_pct = (
+        valid_estimate_count / listing_universe_count * 100.0 if listing_universe_count else 0.0
+    )
+    economic_screen_scope_complete = bool(
+        estimate_acquisition_mode == "analyst_estimates_bulk"
+        and bulk_coverage >= float(config["bulk_estimate_minimum_coverage_pct"])
+    )
+    old_scope_complete = bool(audit.get("scope", {}).get("scope_complete"))
+
     pool_status = str(audit.get("candidate_pool_status") or "")
     selection_outcome = str(audit.get("selection_outcome") or "")
     if selected and pool_status == "sufficient":
@@ -1207,6 +1601,13 @@ def execute_pipeline(
             "candidate-packets/*.fmp-packet.json",
         ],
         "do_not_read_bulk_provider_payloads_into_model_context": True,
+        "listing_enumeration_complete": old_scope_complete,
+        "economic_screen_scope_complete": economic_screen_scope_complete,
+        "listing_universe_count": listing_universe_count,
+        "estimate_seed_count": estimate_seed_count,
+        "estimate_seed_coverage_pct": round(estimate_seed_coverage_pct, 6),
+        "valid_estimate_count": valid_estimate_count,
+        "valid_estimate_coverage_pct": round(valid_estimate_coverage_pct, 6),
         "required_after_underwriting": [
             "manage_run_state.py assemble",
             "evaluate_candidates.py --strict --require-final",
@@ -1222,11 +1623,25 @@ def execute_pipeline(
         "status": status,
         "analysis_as_of": analysis_as_of.isoformat(),
         "conclusion_scope": audit.get("conclusion_scope"),
-        "scope_complete": bool(audit.get("scope", {}).get("scope_complete")),
+        # `scope_complete` communicates *listing enumeration* completeness
+        # only -- it says nothing about economic (estimate/fundamental)
+        # coverage. See `economic_screen_scope_complete` for that.
+        "scope_complete": old_scope_complete,
+        "scope_complete_deprecated_note": (
+            "listing enumeration only; see economic_screen_scope_complete"
+        ),
+        "listing_enumeration_complete": old_scope_complete,
+        "economic_screen_scope_complete": economic_screen_scope_complete,
+        "listing_universe_count": listing_universe_count,
+        "estimate_seed_count": estimate_seed_count,
+        "estimate_seed_coverage_pct": round(estimate_seed_coverage_pct, 6),
+        "valid_estimate_count": valid_estimate_count,
+        "valid_estimate_coverage_pct": round(valid_estimate_coverage_pct, 6),
         "listing_enumeration_verified": bool(enumeration_audit["enumeration_verified"]),
         "listing_query_count": int(enumeration_audit["query_count"]),
         "universe_count": len(enriched_universe),
         "seed_count": len(seed),
+        "seed_audit": seed_audit,
         "normalized_estimate_count": len(normalized_estimates),
         "estimate_acquisition_mode": estimate_acquisition_mode,
         "bulk_estimate_coverage_pct": bulk_coverage,

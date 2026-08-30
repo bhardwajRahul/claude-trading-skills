@@ -3508,10 +3508,10 @@
     "contract_revision": "3.5",
     "runtime": {
       "skill_name": "us-undervalued-growth-screener",
-      "skill_version": "3.6.0",
+      "skill_version": "3.6.1",
       "schema_version": 3,
       "contract_revision": "3.5",
-      "runtime_fingerprint": "ug-v3.6-claude-code-direct-fmp-20260829"
+      "runtime_fingerprint": "ug-v3.6.1-claude-code-direct-fmp-20260830"
     },
     "conclusion_scope": "full_listing_universe",
     "generated_at": "2026-08-28T14:28:34.377069+00:00",
@@ -3727,9 +3727,9 @@
   },
   "runtime": {
     "skill_name": "us-undervalued-growth-screener",
-    "skill_version": "3.6.0",
+    "skill_version": "3.6.1",
     "schema_version": 3,
     "contract_revision": "3.5",
-    "runtime_fingerprint": "ug-v3.6-claude-code-direct-fmp-20260829"
+    "runtime_fingerprint": "ug-v3.6.1-claude-code-direct-fmp-20260830"
   }
 }

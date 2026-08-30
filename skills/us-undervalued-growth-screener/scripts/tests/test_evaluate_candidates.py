@@ -2685,9 +2685,11 @@ class RunStateTests(FixtureMixin, unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
-        self.assertEqual(payload["skill_version"], "3.6.0")
+        self.assertEqual(payload["skill_version"], "3.6.1")
         self.assertEqual(payload["contract_revision"], "3.5")
-        self.assertEqual(payload["runtime_fingerprint"], "ug-v3.6-claude-code-direct-fmp-20260829")
+        self.assertEqual(
+            payload["runtime_fingerprint"], "ug-v3.6.1-claude-code-direct-fmp-20260830"
+        )
 
 
 class RegressionV35Tests(FixtureMixin, unittest.TestCase):

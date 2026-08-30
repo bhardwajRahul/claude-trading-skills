@@ -32,10 +32,10 @@ python3 skills/us-undervalued-growth-screener/scripts/bundle_run_artifacts.py --
 Every command must report the same metadata:
 
 ```text
-skill_version = 3.6.0
+skill_version = 3.6.1
 schema_version = 3
 contract_revision = 3.5
-runtime_fingerprint = ug-v3.6-claude-code-direct-fmp-20260829
+runtime_fingerprint = ug-v3.6.1-claude-code-direct-fmp-20260830
 ```
 
 Discard and regenerate any audit, checkpoint, or snapshot whose runtime metadata differs. Do not mix scripts, assets, or run artifacts from v3.1 through v3.5. A stale or cached same-name skill is a hard execution failure, not a warning.
@@ -208,7 +208,7 @@ python3 skills/us-undervalued-growth-screener/scripts/run_pipeline.py \
 
 The generated FMP client reuses the repository's central `scripts/fmp_client/` source-of-truth pattern. It writes raw responses and a persistent SQLite cache to disk. Do **not** paste or read the raw provider trees into the language-model context. Read only `run-summary.json`, `NEXT_ACTION.json`, `audit/broad-screen-audit.json`, and the compact packets under `candidate-packets/`.
 
-The direct runner first attempts bulk ratios, key metrics, estimate, and EOD datasets. It falls back to bounded per-symbol enrichment only when bulk access is unavailable. Exact 20-day ADDV work is prioritized by the four economic lanes, not by ticker order. Read `references/claude-code-execution.md` for the full execution contract.
+The direct runner first attempts bulk ratios, key metrics, estimate, and EOD datasets. It falls back to bounded per-symbol enrichment only when bulk access is unavailable; a plan-gated (402/403) bulk endpoint is remembered in the cache for 30 days so later runs do not spend calls re-probing it. On the fallback path the estimate seed is a stratified sector × market-cap sample (√-weighted Hamilton quota, liquidity-ranked within cells, hash tie-break) whose size is derived from the remaining call budget; `audit/seed-audit.json` states the selection basis. Before pool selection, the top lane candidates receive a `key-metrics-ttm` quality probe (ROIC, FCF yield, EV/FCF, leverage, SBC) and a probe-resolved row with SBC-adjusted FCF yield below 1% cannot enter any lane except `high_growth_exception`. Exact 20-day ADDV work is prioritized by the four economic lanes, not by ticker order. Read `references/claude-code-execution.md` and `references/migration-v3.6-to-v3.6.1.md` for the full execution contract.
 
 ### Layer 1 — Listing-Universe Audit
 
@@ -235,6 +235,8 @@ Choose the best route in this order:
 4. User-supplied pool only when explicitly supplied.
 
 For a bounded live run, target at least 30 resolved pool rows and at least three represented lanes unless the provider is demonstrably exhausted. A smaller convenience pool may be diagnostic but should not be described as a high-recall GARP search.
+
+State the economic scope honestly. `run-summary.json` separates `listing_enumeration_complete` from `economic_screen_scope_complete` and reports `estimate_seed_coverage_pct` / `valid_estimate_coverage_pct`; on the per-symbol fallback path the economic scope is never complete and the discovery audit records `provider_exhausted_scope: estimate_seed`. Describe such a result as "N seeded names evaluated with consensus estimates", never as a market-wide conclusion.
 
 Do not stop because a TTM or statement endpoint is plan-gated. Switch routes automatically.
 

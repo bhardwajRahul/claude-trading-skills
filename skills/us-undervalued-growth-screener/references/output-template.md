@@ -254,7 +254,7 @@ The evaluator output contains:
 ```json
 {
   "schema_version": 3,
-  "runtime": {"skill_version": "3.6.0", "contract_revision": "3.5", "runtime_fingerprint": "..."},
+  "runtime": {"skill_version": "3.6.1", "contract_revision": "3.5", "runtime_fingerprint": "..."},
   "analysis_as_of": "...",
   "run_metadata": {},
   "ranking_status": "final",

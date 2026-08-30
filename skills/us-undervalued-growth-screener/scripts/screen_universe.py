@@ -687,6 +687,7 @@ def _candidate_decision(
             "net_debt_to_ebitda": leverage,
             "analyst_count": analyst_count,
             "cyclicality_score": cyclicality,
+            "growth_pattern": _text(row.get("growth_pattern")),
             "sector_profile_type": profile_type,
         },
     }
@@ -768,6 +769,7 @@ def _enrichment_queue(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
                 "revenue_growth_pct": revenue_growth,
                 "analyst_count": analyst_count,
                 "cyclicality_score": cyclicality,
+                "growth_pattern": _text(row.get("growth_pattern")),
                 "average_daily_dollar_volume": metrics.get("average_daily_dollar_volume"),
                 "fundamental_completeness_count": row.get("fundamental_completeness_count"),
             }
@@ -980,6 +982,13 @@ def _selection_lane(row: Mapping[str, Any]) -> str:
         return "high_growth_exception"
     if preselection == "near_miss_review":
         return "quality_near_miss"
+    growth_pattern = (
+        _text(metrics.get("growth_pattern")) or _text(row.get("growth_pattern")) or ""
+    ).lower()
+    if growth_pattern == "trough_recovery":
+        # FY1 sits below the latest actual: the FY1->FY3 CAGR is a recovery,
+        # not compounding growth, so the name is reviewed as a near miss.
+        return "quality_near_miss"
     return "core_garp"
 
 
@@ -1034,18 +1043,34 @@ def _select_multilane(
         sector_counts[sector] = sector_counts.get(sector, 0) + 1
         lane_counts[lane] = lane_counts.get(lane, 0) + 1
 
-    for lane in (
-        "core_garp",
-        "high_growth_exception",
-        "quality_near_miss",
-        "cyclical_normalization",
-    ):
-        target = max(0, quotas[lane])
+    plan_total = sum(max(0, value) for value in quotas.values())
+    if limit < plan_total:
+        # Budget smaller than the lane plan (e.g. 3 deep dives vs a 2/1/1/1
+        # plan): a lane-first fill would hand every slot to the first lanes in
+        # plan order and never reach the cyclical lane even when its names
+        # rank highest. Walk the priority order instead and treat each lane
+        # quota as a cap, so every lane's best name competes on priority.
         for row in ranked:
-            if len(selected) >= limit or lane_counts.get(lane, 0) >= target:
+            if len(selected) >= limit:
                 break
-            if _selection_lane(row) == lane and can_add(row):
+            lane = _selection_lane(row)
+            if lane_counts.get(lane, 0) >= max(0, quotas[lane]):
+                continue
+            if can_add(row):
                 add(row)
+    else:
+        for lane in (
+            "core_garp",
+            "high_growth_exception",
+            "quality_near_miss",
+            "cyclical_normalization",
+        ):
+            target = max(0, quotas[lane])
+            for row in ranked:
+                if len(selected) >= limit or lane_counts.get(lane, 0) >= target:
+                    break
+                if _selection_lane(row) == lane and can_add(row):
+                    add(row)
 
     for row in ranked:
         if len(selected) >= limit:

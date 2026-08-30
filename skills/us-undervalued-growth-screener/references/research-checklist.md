@@ -5,7 +5,7 @@ Use this checklist for every broad-screen survivor. Mark each item `verified`, `
 
 ## v3.5 Runtime and Independent-Bridge Checks
 
-- [ ] Every helper `--version` reports v3.6.0 / contract 3.5 / the expected fingerprint.
+- [ ] Every helper `--version` reports v3.6.1 / contract 3.5 / the expected fingerprint.
 - [ ] Audit, checkpoint, and snapshot runtime metadata match the installed skill.
 - [ ] The user-requested scope remains separate from the executed retrieval scope; no internal single-band rewrite occurred.
 - [ ] Discovery liquidity uses a documented 20+ session average and source IDs, never one-session volume.

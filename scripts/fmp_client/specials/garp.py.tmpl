@@ -117,6 +117,8 @@ class FMPClient:
     V3_URL = "https://financialmodelingprep.com/api/v3"
     RATE_LIMIT_DELAY = 0.30
     ENDPOINT_FAILURE_THRESHOLD = 3
+    CAPABILITY_CACHE_TTL_DAYS = 30
+    CAPABILITY_DISABLING_STATUS_CODES = (402, 403)
 
     def __init__(
         self,
@@ -129,6 +131,7 @@ class FMPClient:
         offline: bool = False,
         timeout_seconds: int = 30,
         rate_limit_delay: float | None = None,
+        respect_capability_cache: bool = True,
     ):
         self.api_key = api_key or os.getenv("FMP_API_KEY")
         self.offline = bool(offline)
@@ -153,6 +156,13 @@ class FMPClient:
         self.failures: list[dict[str, Any]] = []
         self._endpoint_failures: dict[str, int] = {}
         self._disabled_endpoints: set[str] = set()
+        self.respect_capability_cache = bool(respect_capability_cache)
+        self.capability_cache_hits = 0
+
+    @property
+    def remaining_calls(self) -> int:
+        """API calls still available under the configured budget (never negative)."""
+        return max(0, self.max_api_calls - self.api_calls_made)
 
     def __enter__(self) -> FMPClient:
         return self
@@ -469,20 +479,67 @@ class FMPClient:
             return [str(value).upper() for value in data if isinstance(value, str)]
         return []
 
+    @staticmethod
+    def _capability_cache_key(url: str) -> str:
+        return f"capability:{url}"
+
+    def _capability_ttl_seconds(self) -> int:
+        return self.CAPABILITY_CACHE_TTL_DAYS * 86_400
+
+    def _get_cached_capability(self, url: str) -> dict[str, Any] | None:
+        payload = self.cache.get(self._capability_cache_key(url), self._capability_ttl_seconds())
+        return dict(payload) if isinstance(payload, Mapping) else None
+
+    def _put_cached_capability(self, url: str, status_code: int) -> None:
+        payload = {
+            "endpoint": url,
+            "status": status_code,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "ttl_days": self.CAPABILITY_CACHE_TTL_DAYS,
+        }
+        self.cache.put(self._capability_cache_key(url), payload)
+
     def get_bulk_dataset(self, endpoint: str, **params: Any) -> list[dict[str, Any]]:
         """Fetch a stable bulk endpoint; return an empty list when unavailable.
 
         Endpoint names remain configuration-driven because FMP plan access and
         stable endpoint naming can vary. Callers must record an unavailable
         endpoint and use the bounded per-symbol fallback rather than invent data.
+
+        A 402/403 response is remembered in the persistent SQLite cache as an
+        endpoint "capability" (plan access, not data). Later client instances
+        pointed at the same cache path skip the HTTP call entirely for a
+        capability entry that is still fresh (``CAPABILITY_CACHE_TTL_DAYS``),
+        so a known-unavailable bulk endpoint never spends provider budget
+        again within the TTL window. Set ``respect_capability_cache=False`` on
+        construction to re-probe every endpoint unconditionally.
         """
+        url = f"{self.STABLE_URL}/{endpoint.lstrip('/')}"
+        if self.respect_capability_cache:
+            cached = self._get_cached_capability(url)
+            if (
+                cached is not None
+                and cached.get("status") in self.CAPABILITY_DISABLING_STATUS_CODES
+            ):
+                self.capability_cache_hits += 1
+                self._disabled_endpoints.add(url)
+                return []
+        failure_count_before = len(self.failures)
         data = self._request_json(
-            f"{self.STABLE_URL}/{endpoint.lstrip('/')}",
+            url,
             params,
             ttl_seconds=self.cache_policy.statements_ttl_seconds,
             allow_empty=True,
             quiet=True,
         )
+        if self.respect_capability_cache and len(self.failures) > failure_count_before:
+            last_failure = self.failures[-1]
+            status_code = last_failure.get("status_code")
+            if (
+                last_failure.get("endpoint") == url
+                and status_code in self.CAPABILITY_DISABLING_STATUS_CODES
+            ):
+                self._put_cached_capability(url, status_code)
         return [dict(row) for row in data] if isinstance(data, list) else []
 
     def diagnostics(self) -> dict[str, Any]:
@@ -493,5 +550,7 @@ class FMPClient:
             "failure_count": len(self.failures),
             "failure_samples": self.failures[:20],
             "disabled_endpoint_count": len(self._disabled_endpoints),
+            "capability_cache_hits": self.capability_cache_hits,
+            "remaining_calls": self.remaining_calls,
             "offline": self.offline,
         }

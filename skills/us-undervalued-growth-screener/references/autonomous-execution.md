@@ -15,10 +15,10 @@ All run artifacts must contain the installed runtime metadata:
 ```json
 {
   "skill_name": "us-undervalued-growth-screener",
-  "skill_version": "3.6.0",
+  "skill_version": "3.6.1",
   "schema_version": 3,
   "contract_revision": "3.5",
-  "runtime_fingerprint": "ug-v3.6-claude-code-direct-fmp-20260829"
+  "runtime_fingerprint": "ug-v3.6.1-claude-code-direct-fmp-20260830"
 }
 ```
 
