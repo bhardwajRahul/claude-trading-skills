@@ -22,6 +22,9 @@ env/
 .envrc
 .mcp.json
 
+# Local provider/API caches. Never commit credentials or raw provider payloads.
+.cache/
+
 # Logs & temp
 logs/
 *.log

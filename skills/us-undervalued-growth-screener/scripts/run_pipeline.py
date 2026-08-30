@@ -1,0 +1,1342 @@
+#!/usr/bin/env python3
+"""Claude Code-native direct-FMP discovery pipeline for the US GARP skill.
+
+Bulk provider payloads stay on disk.  The program prints one compact JSON summary
+and emits auditable JSON/JSONL artifacts consumed by the existing contract-3.5
+underwriting and evaluation workflow.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from build_provider_prefilter_pool import ALLOWED_LANES, build_pool
+from fmp_client import ApiCallBudgetExceeded, FMPClient
+from normalize_estimates import normalize_symbol
+from screen_universe import DEFAULTS as SCREEN_DEFAULTS
+from screen_universe import _canonical_line, run_layered
+from skill_version import runtime_metadata
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "min_market_cap": 500_000_000,
+    "max_market_cap": 20_000_000_000,
+    "min_price": 5.0,
+    "hard_min_average_daily_dollar_volume": 1_000_000,
+    "min_average_daily_dollar_volume": 5_000_000,
+    "max_api_calls": 350,
+    "company_screener_limit": 1_000,
+    "minimum_market_cap_band_width": 25_000_000,
+    "maximum_market_cap_band_depth": 12,
+    "bulk_estimate_years": 5,
+    "bulk_estimate_minimum_coverage_pct": 20.0,
+    "pre_enrichment_limit": 80,
+    "exact_liquidity_limit": 40,
+    "provider_prefilter_pool_size": 30,
+    "provider_prefilter_minimum_pool": 12,
+    "provider_prefilter_per_lane": 8,
+    "max_deep_dive_candidates": 3,
+    "minimum_discovery_analyst_count": 2,
+    "maximum_forward_eps_dispersion_pct": 100.0,
+    "maximum_fy1_horizon_days": 430,
+    "forward_pe_reconciliation_tolerance_pct": 5.0,
+    "minimum_average_volume_period_days": 20,
+    "minimum_revenue_growth_pct": 8.0,
+    "minimum_per_share_growth_pct": 12.0,
+    "preferred_forward_pe": 20.0,
+    "high_growth_exception_max_forward_pe": 30.0,
+    "high_growth_exception_growth_pct": 20.0,
+    "near_miss_max_forward_pe": 22.0,
+    "near_miss_min_per_share_growth_pct": 8.0,
+    "preferred_ev_to_fcf": 20.0,
+    "preferred_fcf_yield_pct": 5.0,
+    "minimum_roic_pct": 8.0,
+    "preferred_max_dilution_pct": 3.0,
+    "preferred_max_net_debt_to_ebitda": 2.5,
+    "hard_max_net_debt_to_ebitda": 4.0,
+    "maximum_forward_pe_for_economic_screen": 60.0,
+    "sector_review_selection_penalty": 5.0,
+    "near_miss_selection_penalty": 4.0,
+    "missing_deep_dive_field_penalty": 1.5,
+    "selection_lane_quota_core_garp": 2,
+    "selection_lane_quota_high_growth": 1,
+    "selection_lane_quota_near_miss": 1,
+    "selection_lane_quota_cyclical": 1,
+    "maximum_selected_per_sector": 2,
+    "maximum_enrichment_attempts": 80,
+    "minimum_listing_data_coverage_pct": 95.0,
+    "max_estimate_age_days": 45,
+    "bulk_endpoints": {
+        "ratios_ttm": "ratios-ttm-bulk",
+        "key_metrics_ttm": "key-metrics-ttm-bulk",
+        "income_growth": "income-statement-growth-bulk",
+        "analyst_estimates": "analyst-estimates-bulk",
+        "eod": "eod-bulk",
+    },
+    "cache": {"path": ".cache/us-garp/fmp-cache.sqlite3", "raw_store_dir": ".cache/us-garp/raw"},
+    "compact_stdout_max_bytes": 20_000,
+}
+
+EXCHANGES = ("NASDAQ", "NYSE", "AMEX")
+NON_COMMON_NAME = re.compile(
+    r"\b(preferred|depositary shares?|warrants?|rights?|units?|notes?|debentures?|bonds?|closed[- ]end|income fund)\b",
+    re.IGNORECASE,
+)
+NON_COMMON_SYMBOL = re.compile(r"(?:[-.](?:P[A-Z]?|WS|WT|W|U|R))$", re.IGNORECASE)
+
+CYCLICAL_RULES: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (5, ("airline", "marine shipping", "oil tanker", "dry bulk", "steel", "coal", "iron ore")),
+    (
+        4,
+        (
+            "semiconductor",
+            "chemical",
+            "mining",
+            "oil & gas",
+            "oilfield",
+            "auto manufacturer",
+            "auto parts",
+            "homebuilding",
+            "building materials",
+            "forest products",
+            "paper",
+            "agricultural",
+            "farm products",
+            "meat products",
+        ),
+    ),
+    (
+        3,
+        (
+            "machinery",
+            "industrial distribution",
+            "advertising",
+            "staffing",
+            "casino",
+            "resort",
+            "hotel",
+            "transportation",
+            "trucking",
+            "railroad",
+            "construction",
+            "consumer cyclical",
+        ),
+    ),
+)
+
+
+@dataclass
+class PipelineResult:
+    summary: dict[str, Any]
+    exit_code: int
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _first_number(row: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _number(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _text(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _symbol(row: Mapping[str, Any]) -> str:
+    return (_text(row.get("symbol")) or _text(row.get("ticker")) or "UNKNOWN").upper()
+
+
+def _canonical_jsonl(rows: Sequence[Mapping[str, Any]]) -> bytes:
+    return b"".join(
+        (
+            json.dumps(dict(row), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        for row in rows
+    )
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp, path)
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _canonical_jsonl(rows)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_bytes(data)
+    os.replace(temp, path)
+    return hashlib.sha256(data).hexdigest()
+
+
+def load_config(path: Path | None) -> dict[str, Any]:
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
+    if path is None:
+        return config
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ValueError("pipeline config must be a JSON object")
+    for key, item in value.items():
+        if isinstance(item, Mapping) and isinstance(config.get(key), Mapping):
+            config[key].update(item)
+        else:
+            config[key] = item
+    return config
+
+
+def is_common_stock(row: Mapping[str, Any]) -> bool:
+    if bool(row.get("isEtf")) or bool(row.get("isFund")):
+        return False
+    if row.get("isActivelyTrading") is False:
+        return False
+    name = _text(row.get("companyName")) or _text(row.get("name")) or ""
+    symbol = _symbol(row)
+    if NON_COMMON_NAME.search(name) or NON_COMMON_SYMBOL.search(symbol):
+        return False
+    return symbol != "UNKNOWN"
+
+
+def normalize_listing(row: Mapping[str, Any], exchange: str) -> dict[str, Any] | None:
+    price = _first_number(row, "price", "last")
+    market_cap = _first_number(row, "marketCap", "mktCap", "market_cap")
+    if price is None or market_cap is None:
+        return None
+    symbol = _symbol(row)
+    return {
+        "symbol": symbol,
+        "company_name": _text(row.get("companyName")) or _text(row.get("name")) or symbol,
+        "exchange": (
+            _text(row.get("exchangeShortName")) or _text(row.get("exchange")) or exchange
+        ).upper(),
+        "sector": _text(row.get("sector")),
+        "industry": _text(row.get("industry")),
+        "price": price,
+        "market_cap": market_cap,
+        "volume": _first_number(row, "volume"),
+        "is_actively_trading": row.get("isActivelyTrading", True) is not False,
+        "is_common_stock": is_common_stock(row),
+        "common_stock": is_common_stock(row),
+        "currency": _text(row.get("currency")),
+        "country": _text(row.get("country")),
+    }
+
+
+def collect_listing_universe(
+    client: FMPClient,
+    *,
+    min_market_cap: float,
+    max_market_cap: float,
+    min_price: float,
+    page_limit: int,
+    minimum_band_width: float,
+    maximum_depth: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Enumerate the listing frame with adaptive market-cap band splitting.
+
+    FMP's company screener has no portable pagination contract across legacy and
+    stable plans.  A saturated response is therefore split into overlapping
+    market-cap bands until every leaf returns fewer rows than ``page_limit``.
+    Provider payloads stay in the FMP client's raw store; only normalized rows
+    and a compact enumeration audit are returned.
+    """
+    if page_limit <= 0:
+        raise ValueError("company_screener_limit must be positive")
+    if minimum_band_width <= 0 or max_market_cap <= min_market_cap:
+        raise ValueError("invalid market-cap enumeration range")
+
+    rows: list[dict[str, Any]] = []
+    leaves: list[dict[str, Any]] = []
+    query_count = 0
+    saturated_leaves: list[dict[str, Any]] = []
+
+    for exchange in EXCHANGES:
+        stack: list[tuple[float, float, int]] = [(min_market_cap, max_market_cap, 0)]
+        while stack:
+            band_min, band_max, depth = stack.pop()
+            payload = client.get_company_screener(
+                exchange=exchange,
+                min_market_cap=band_min,
+                max_market_cap=band_max,
+                min_price=min_price,
+                limit=page_limit,
+            )
+            query_count += 1
+            saturated = len(payload) >= page_limit
+            can_split = depth < maximum_depth and (band_max - band_min) > minimum_band_width
+            if saturated and can_split:
+                midpoint = (band_min + band_max) / 2.0
+                # The provider uses MoreThan/LowerThan semantics on some plans.
+                # A one-dollar overlap prevents an exact-boundary omission; rows
+                # are deterministically deduplicated after collection.
+                stack.append((max(band_min, midpoint - 1.0), band_max, depth + 1))
+                stack.append((band_min, min(band_max, midpoint + 1.0), depth + 1))
+                continue
+
+            leaf = {
+                "exchange": exchange,
+                "min_market_cap": band_min,
+                "max_market_cap": band_max,
+                "row_count": len(payload),
+                "provider_exhausted": not saturated,
+                "depth": depth,
+            }
+            leaves.append(leaf)
+            if saturated:
+                saturated_leaves.append(leaf)
+            for item in payload:
+                normalized = normalize_listing(item, exchange)
+                if normalized is not None:
+                    rows.append(normalized)
+
+    # Prefer one canonical listing row per ticker.  Dual-listed or provider
+    # duplicate rows are resolved by the requested exchange order, then by the
+    # row with the larger market-cap observation.
+    exchange_rank = {value: idx for idx, value in enumerate(EXCHANGES)}
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        symbol = _symbol(row)
+        current = deduped.get(symbol)
+        if current is None:
+            deduped[symbol] = row
+            continue
+        new_key = (
+            -exchange_rank.get(str(row.get("exchange") or "").upper(), 99),
+            _first_number(row, "market_cap") or 0.0,
+        )
+        old_key = (
+            -exchange_rank.get(str(current.get("exchange") or "").upper(), 99),
+            _first_number(current, "market_cap") or 0.0,
+        )
+        if new_key > old_key:
+            deduped[symbol] = row
+
+    normalized_rows = sorted(deduped.values(), key=lambda row: _symbol(row))
+    audit = {
+        "method": "adaptive_market_cap_bands",
+        "requested_min_market_cap": min_market_cap,
+        "requested_max_market_cap": max_market_cap,
+        "min_price": min_price,
+        "page_limit": page_limit,
+        "query_count": query_count,
+        "row_count": len(normalized_rows),
+        "bands": sorted(
+            leaves,
+            key=lambda row: (
+                str(row["exchange"]),
+                float(row["min_market_cap"]),
+                float(row["max_market_cap"]),
+            ),
+        ),
+        "saturated_leaf_count": len(saturated_leaves),
+        "enumeration_verified": not saturated_leaves,
+    }
+    return normalized_rows, audit
+
+
+def market_cap_bucket(value: float) -> str:
+    bounds = (
+        500_000_000,
+        1_000_000_000,
+        2_000_000_000,
+        5_000_000_000,
+        10_000_000_000,
+        20_000_000_000,
+    )
+    for low, high in zip(bounds, bounds[1:]):
+        if low <= value < high:
+            return f"{low}-{high}"
+    return "other"
+
+
+def classify_cyclicality(sector: str | None, industry: str | None) -> int:
+    text = f"{sector or ''} {industry or ''}".lower()
+    for score, needles in CYCLICAL_RULES:
+        if any(needle in text for needle in needles):
+            return score
+    if "financial" in text or "bank" in text or "insurance" in text:
+        return 3
+    return 2
+
+
+def merge_bulk_rows(
+    rows_by_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = defaultdict(dict)
+    for dataset, rows in rows_by_dataset.items():
+        for row in rows:
+            symbol = _symbol(row)
+            if symbol == "UNKNOWN":
+                continue
+            merged[symbol][dataset] = dict(row)
+    return dict(merged)
+
+
+def collect_bulk_annual_estimates(
+    client: FMPClient,
+    *,
+    endpoint: str | None,
+    universe_symbols: set[str],
+    analysis_as_of: datetime,
+    year_count: int,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    """Collect annual estimate rows in bulk when the provider plan supports it."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    calls: list[dict[str, Any]] = []
+    if not endpoint or year_count <= 0:
+        return {}, {"available": False, "reason": "endpoint_not_configured", "calls": []}
+
+    for year in range(analysis_as_of.year, analysis_as_of.year + year_count):
+        rows = client.get_bulk_dataset(endpoint, year=year, period="annual")
+        calls.append({"year": year, "row_count": len(rows)})
+        for raw in rows:
+            symbol = _symbol(raw)
+            if symbol in universe_symbols:
+                grouped[symbol].append(dict(raw))
+
+    for values in grouped.values():
+        values.sort(key=lambda row: str(row.get("date") or row.get("period_end") or ""))
+    coverage_pct = (len(grouped) / len(universe_symbols) * 100.0) if universe_symbols else 0.0
+    return dict(grouped), {
+        "available": bool(grouped),
+        "covered_symbol_count": len(grouped),
+        "universe_symbol_count": len(universe_symbols),
+        "coverage_pct": coverage_pct,
+        "calls": calls,
+    }
+
+
+def normalize_estimate_frame(
+    listings: Sequence[Mapping[str, Any]],
+    estimates_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    analysis_as_of: datetime,
+    source_id: str,
+    config: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for listing in listings:
+        symbol = _symbol(listing)
+        normalized = normalize_symbol(
+            symbol,
+            estimates_by_symbol.get(symbol, []),
+            listing,
+            analysis_as_of=analysis_as_of,
+            estimate_as_of=analysis_as_of,
+            source_ids=[source_id],
+            minimum_analysts=int(config["minimum_discovery_analyst_count"]),
+            max_dispersion_pct=float(config["maximum_forward_eps_dispersion_pct"]),
+            max_fy1_horizon_days=int(config["maximum_fy1_horizon_days"]),
+            forward_pe_tolerance_pct=float(config["forward_pe_reconciliation_tolerance_pct"]),
+        )
+        normalized["cyclicality_score"] = classify_cyclicality(
+            _text(normalized.get("sector")), _text(normalized.get("industry"))
+        )
+        output.append(normalized)
+    return output
+
+
+def _metric_from_bulk(bundle: Mapping[str, Any], *keys: str) -> float | None:
+    for dataset in ("ratios_ttm", "key_metrics_ttm", "income_growth"):
+        row = bundle.get(dataset)
+        if not isinstance(row, Mapping):
+            continue
+        value = _first_number(row, *keys)
+        if value is not None:
+            return value
+    return None
+
+
+def enrich_listing_from_bulk(row: Mapping[str, Any], bundle: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    result["roic_pct"] = _metric_from_bulk(
+        bundle, "returnOnInvestedCapital", "roic", "returnOnInvestedCapitalTTM"
+    )
+    roic = _number(result.get("roic_pct"))
+    if roic is not None and abs(roic) <= 2:
+        result["roic_pct"] = roic * 100.0
+    result["ev_to_fcf"] = _metric_from_bulk(
+        bundle, "enterpriseValueOverFCF", "enterpriseValueOverFreeCashFlow", "evToFreeCashFlow"
+    )
+    result["net_debt_to_ebitda"] = _metric_from_bulk(bundle, "netDebtToEBITDA", "netDebtToEbitda")
+    result["revenue_growth_pct"] = _metric_from_bulk(
+        bundle, "growthRevenue", "revenueGrowth", "revenueGrowthTTM"
+    )
+    result["eps_growth_pct"] = _metric_from_bulk(bundle, "growthEPS", "epsgrowth", "epsGrowth")
+    result["dilution_pct"] = _metric_from_bulk(
+        bundle, "weightedAverageShsOutDilGrowth", "weightedAverageSharesGrowth"
+    )
+    fcf_yield = _metric_from_bulk(bundle, "freeCashFlowYield", "fcfYield")
+    if fcf_yield is not None and abs(fcf_yield) <= 2:
+        fcf_yield *= 100.0
+    result["fcf_yield_pct"] = fcf_yield
+    result["cyclicality_score"] = classify_cyclicality(
+        _text(result.get("sector")), _text(result.get("industry"))
+    )
+    return result
+
+
+def pre_enrichment_score(row: Mapping[str, Any]) -> float:
+    score = 0.0
+    pe = _first_number(row, "priceEarningsRatio", "peRatio", "pe")
+    if pe is not None and pe > 0:
+        score += max(-20.0, 30.0 - min(pe, 60.0))
+    eps_growth = _first_number(row, "eps_growth_pct")
+    revenue_growth = _first_number(row, "revenue_growth_pct")
+    roic = _first_number(row, "roic_pct")
+    fcf_yield = _first_number(row, "fcf_yield_pct")
+    if eps_growth is not None:
+        score += max(-10.0, min(eps_growth, 40.0))
+    if revenue_growth is not None:
+        score += max(-5.0, min(revenue_growth, 20.0)) * 0.5
+    if roic is not None:
+        score += max(-5.0, min(roic, 30.0)) * 0.3
+    if fcf_yield is not None:
+        score += max(-5.0, min(fcf_yield, 15.0))
+    volume = _first_number(row, "volume") or 0.0
+    price = _first_number(row, "price") or 0.0
+    if volume > 0 and price > 0:
+        score += min(8.0, math.log10(max(volume * price, 1.0)))
+    return round(score, 6)
+
+
+def diversified_seed(rows: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
+    cells: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for raw in rows:
+        row = dict(raw)
+        sector = (_text(row.get("sector")) or "Unknown").lower()
+        cap = _first_number(row, "market_cap") or 0.0
+        cells[(sector, market_cap_bucket(cap))].append(row)
+    for values in cells.values():
+        values.sort(key=lambda row: (-pre_enrichment_score(row), _symbol(row)))
+    selected: list[dict[str, Any]] = []
+    depth = 0
+    while len(selected) < limit:
+        added = False
+        for cell in sorted(cells):
+            values = cells[cell]
+            if depth < len(values):
+                selected.append(values[depth])
+                added = True
+                if len(selected) >= limit:
+                    break
+        if not added:
+            break
+        depth += 1
+    return selected
+
+
+def prior_business_days(as_of: date, count: int) -> list[date]:
+    days: list[date] = []
+    current = as_of
+    while len(days) < count:
+        if current.weekday() < 5:
+            days.append(current)
+        current -= timedelta(days=1)
+    return days
+
+
+def apply_bulk_liquidity(
+    client: FMPClient,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    as_of: date,
+    endpoint: str,
+    source_id: str,
+    required_days: int = 20,
+) -> tuple[list[dict[str, Any]], bool]:
+    volumes: dict[str, list[float]] = defaultdict(list)
+    successful_dates = 0
+    for day in prior_business_days(as_of, required_days + 8):
+        data = client.get_bulk_dataset(endpoint, date=day.isoformat())
+        if not data:
+            if successful_dates == 0:
+                return [dict(row) for row in rows], False
+            continue
+        successful_dates += 1
+        for item in data:
+            symbol = _symbol(item)
+            volume = _first_number(item, "volume")
+            if volume is not None and volume > 0:
+                volumes[symbol].append(volume)
+        if successful_dates >= required_days:
+            break
+    if successful_dates < required_days:
+        return [dict(row) for row in rows], False
+    output: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        symbol = _symbol(row)
+        values = volumes.get(symbol, [])[:required_days]
+        price = _first_number(row, "price")
+        if len(values) >= required_days and price is not None and price > 0:
+            avg = sum(values) / len(values)
+            row.update(
+                {
+                    "average_volume": avg,
+                    "average_volume_period_days": required_days,
+                    "average_daily_dollar_volume": avg * price,
+                    "average_daily_dollar_volume_method": "price_x_20d_average_volume",
+                    "liquidity_source_ids": [source_id],
+                }
+            )
+        output.append(row)
+    return output, True
+
+
+def apply_symbol_liquidity(
+    client: FMPClient,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    as_of: date,
+    source_id: str,
+    limit: int,
+    required_days: int = 20,
+    target_symbols: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    ranked = sorted(
+        (dict(row) for row in rows), key=lambda row: (-pre_enrichment_score(row), _symbol(row))
+    )
+    chosen = (
+        {str(value).upper() for value in target_symbols if str(value).strip()}
+        if target_symbols is not None
+        else {_symbol(row) for row in ranked[:limit]}
+    )
+    if len(chosen) > limit:
+        ordered = [_symbol(row) for row in ranked if _symbol(row) in chosen]
+        chosen = set(ordered[:limit])
+    start = (as_of - timedelta(days=45)).isoformat()
+    end = as_of.isoformat()
+    output: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        symbol = _symbol(row)
+        if symbol not in chosen:
+            output.append(row)
+            continue
+        history = client.get_historical_prices(symbol, from_date=start, to_date=end)
+        volumes = [
+            value
+            for item in history
+            if (value := _first_number(item, "volume")) is not None and value > 0
+        ][:required_days]
+        price = _first_number(row, "price")
+        if len(volumes) >= required_days and price is not None and price > 0:
+            avg = sum(volumes) / len(volumes)
+            row.update(
+                {
+                    "average_volume": avg,
+                    "average_volume_period_days": required_days,
+                    "average_daily_dollar_volume": avg * price,
+                    "average_daily_dollar_volume_method": "price_x_20d_average_volume",
+                    "liquidity_source_ids": [source_id],
+                }
+            )
+        output.append(row)
+    return output
+
+
+def select_liquidity_targets(
+    rows: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+    *,
+    limit: int,
+) -> list[str]:
+    """Choose exact-liquidity work by opportunity lane, not ticker order."""
+    lane_rows: dict[str, list[dict[str, Any]]] = {lane: [] for lane in ALLOWED_LANES}
+    for raw in rows:
+        row = dict(raw)
+        for lane in lane_memberships(row, config):
+            lane_rows[lane].append(row)
+    for lane in lane_rows:
+        lane_rows[lane].sort(key=lambda row: (-pre_enrichment_score(row), _symbol(row)))
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    pointers = {lane: 0 for lane in ALLOWED_LANES}
+    ordered_lanes = (
+        "core_garp",
+        "high_growth_exception",
+        "quality_near_miss",
+        "cyclical_normalization",
+    )
+    while len(selected) < limit:
+        added = False
+        for lane in ordered_lanes:
+            values = lane_rows[lane]
+            pointer = pointers[lane]
+            while pointer < len(values) and _symbol(values[pointer]) in seen:
+                pointer += 1
+            pointers[lane] = pointer
+            if pointer >= len(values):
+                continue
+            symbol = _symbol(values[pointer])
+            pointers[lane] = pointer + 1
+            selected.append(symbol)
+            seen.add(symbol)
+            added = True
+            if len(selected) >= limit:
+                break
+        if not added:
+            break
+
+    if len(selected) < limit:
+        remaining = sorted(rows, key=lambda row: (-pre_enrichment_score(row), _symbol(row)))
+        for row in remaining:
+            symbol = _symbol(row)
+            if symbol not in seen:
+                selected.append(symbol)
+                seen.add(symbol)
+                if len(selected) >= limit:
+                    break
+    return selected
+
+
+def lane_memberships(row: Mapping[str, Any], config: Mapping[str, Any]) -> list[str]:
+    pe = _first_number(row, "forward_pe", "fy1_pe")
+    growth = _first_number(row, "eps_growth_pct", "per_share_growth_pct")
+    revenue = _first_number(row, "revenue_growth_pct")
+    cyclicality = int(_first_number(row, "cyclicality_score") or 2)
+    lanes: list[str] = []
+    if pe is not None and growth is not None:
+        if pe <= float(config["preferred_forward_pe"]) and growth >= float(
+            config["minimum_per_share_growth_pct"]
+        ):
+            lanes.append("core_garp")
+        if pe <= float(config["high_growth_exception_max_forward_pe"]) and growth >= float(
+            config["high_growth_exception_growth_pct"]
+        ):
+            lanes.append("high_growth_exception")
+        if pe <= float(config["near_miss_max_forward_pe"]) and growth >= float(
+            config["near_miss_min_per_share_growth_pct"]
+        ):
+            if (
+                revenue is None
+                or revenue < float(config["minimum_revenue_growth_pct"])
+                or growth < float(config["minimum_per_share_growth_pct"])
+            ):
+                lanes.append("quality_near_miss")
+        if (
+            cyclicality >= 3
+            and pe <= float(config["high_growth_exception_max_forward_pe"])
+            and growth >= float(config["near_miss_min_per_share_growth_pct"])
+        ):
+            lanes.append("cyclical_normalization")
+    return sorted(set(lanes))
+
+
+def compact_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": _symbol(row),
+        "company_name": row.get("company_name"),
+        "sector": row.get("sector"),
+        "industry": row.get("industry"),
+        "price": row.get("price"),
+        "market_cap": row.get("market_cap"),
+        "forward_pe": row.get("forward_pe"),
+        "forward_eps": row.get("forward_eps"),
+        "forward_fiscal_year": row.get("forward_fiscal_year"),
+        "analyst_count": row.get("analyst_count"),
+        "eps_growth_pct": row.get("eps_growth_pct"),
+        "revenue_growth_pct": row.get("revenue_growth_pct"),
+        "roic_pct": row.get("roic_pct"),
+        "fcf_yield_pct": row.get("fcf_yield_pct"),
+        "ev_to_fcf": row.get("ev_to_fcf"),
+        "net_debt_to_ebitda": row.get("net_debt_to_ebitda"),
+        "cyclicality_score": row.get("cyclicality_score"),
+        "provider_prefilter_lanes": row.get("provider_prefilter_lanes", []),
+    }
+
+
+def _project_rows(
+    rows: Sequence[Mapping[str, Any]],
+    fields: Sequence[str],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for raw in list(rows)[:limit]:
+        item = {key: raw.get(key) for key in fields if key in raw}
+        output.append(item)
+    return output
+
+
+def _cash_flow_ttm_preview(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    quarters = list(rows)[:4]
+    if len(quarters) < 4:
+        return {"available": False, "reason": "fewer_than_four_provider_quarters"}
+    ocf_values: list[float] = []
+    capex_values: list[float] = []
+    sbc_values: list[float] = []
+    for row in quarters:
+        ocf = _first_number(row, "operatingCashFlow", "netCashProvidedByOperatingActivities")
+        capex = _first_number(row, "capitalExpenditure", "capitalExpenditures")
+        if ocf is None or capex is None:
+            return {"available": False, "reason": "provider_quarter_missing_ocf_or_capex"}
+        ocf_values.append(ocf)
+        capex_values.append(abs(capex))
+        sbc_values.append(_first_number(row, "stockBasedCompensation") or 0.0)
+    ocf_ttm = sum(ocf_values)
+    capex_ttm = sum(capex_values)
+    return {
+        "available": True,
+        "method": "sum_4_provider_quarters_preview",
+        "primary_source_verified": False,
+        "operating_cash_flow": ocf_ttm,
+        "capex_cash_outflow": capex_ttm,
+        "standard_fcf": ocf_ttm - capex_ttm,
+        "stock_based_compensation": sum(sbc_values),
+        "period_ends": [row.get("date") for row in quarters],
+    }
+
+
+def build_fmp_packet(client: FMPClient, row: Mapping[str, Any], output_dir: Path) -> Path:
+    """Write a compact provider evidence packet and keep full payloads on disk."""
+    symbol = _symbol(row)
+    profile = client.get_profile(symbol)
+    quote = client.get_quotes([symbol]).get(symbol)
+    estimates = client.get_analyst_estimates(symbol, period="annual", limit=6)
+    income_annual = client.get_income_statement(symbol, period="annual", limit=6)
+    income_quarterly = client.get_income_statement(symbol, period="quarter", limit=8)
+    balance_annual = client.get_balance_sheet(symbol, period="annual", limit=6)
+    balance_quarterly = client.get_balance_sheet(symbol, period="quarter", limit=8)
+    cash_flow_annual = client.get_cash_flow(symbol, period="annual", limit=6)
+    cash_flow_quarterly = client.get_cash_flow(symbol, period="quarter", limit=8)
+    key_metrics_ttm = client.get_key_metrics_ttm(symbol)
+    ratios_ttm = client.get_ratios_ttm(symbol)
+    peers = client.get_stock_peers(symbol)
+
+    raw_dir = output_dir.parent / "provider" / "candidate-data" / symbol
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_payloads = {
+        "profile": profile,
+        "quote": quote,
+        "analyst-estimates": estimates,
+        "income-annual": income_annual,
+        "income-quarterly": income_quarterly,
+        "balance-annual": balance_annual,
+        "balance-quarterly": balance_quarterly,
+        "cash-flow-annual": cash_flow_annual,
+        "cash-flow-quarterly": cash_flow_quarterly,
+        "key-metrics-ttm": key_metrics_ttm,
+        "ratios-ttm": ratios_ttm,
+        "peers": peers,
+    }
+    evidence_paths: dict[str, str] = {}
+    for name, payload in raw_payloads.items():
+        target = raw_dir / f"{name}.json"
+        _write_json(target, payload)
+        evidence_paths[name] = str(target.relative_to(output_dir.parent))
+
+    income_fields = (
+        "date",
+        "calendarYear",
+        "period",
+        "reportedCurrency",
+        "revenue",
+        "grossProfit",
+        "operatingIncome",
+        "ebitda",
+        "netIncome",
+        "eps",
+        "epsdiluted",
+        "weightedAverageShsOut",
+        "weightedAverageShsOutDil",
+        "incomeTaxExpense",
+        "interestExpense",
+        "interestIncome",
+    )
+    cash_flow_fields = (
+        "date",
+        "calendarYear",
+        "period",
+        "reportedCurrency",
+        "netIncome",
+        "operatingCashFlow",
+        "capitalExpenditure",
+        "freeCashFlow",
+        "stockBasedCompensation",
+        "commonStockIssued",
+        "commonStockRepurchased",
+        "dividendsPaid",
+        "acquisitionsNet",
+    )
+    balance_fields = (
+        "date",
+        "calendarYear",
+        "period",
+        "reportedCurrency",
+        "cashAndCashEquivalents",
+        "shortTermInvestments",
+        "cashAndShortTermInvestments",
+        "totalCurrentAssets",
+        "totalAssets",
+        "shortTermDebt",
+        "longTermDebt",
+        "totalDebt",
+        "netDebt",
+        "goodwill",
+        "intangibleAssets",
+        "totalStockholdersEquity",
+    )
+    estimate_fields = (
+        "symbol",
+        "date",
+        "fiscalYear",
+        "revenueAvg",
+        "revenueLow",
+        "revenueHigh",
+        "epsAvg",
+        "epsLow",
+        "epsHigh",
+        "numAnalystsRevenue",
+        "numAnalystsEps",
+        "ebitdaAvg",
+        "ebitAvg",
+        "netIncomeAvg",
+        "sgaExpenseAvg",
+    )
+
+    packet = {
+        "runtime": runtime_metadata(),
+        "symbol": symbol,
+        "purpose": "provider evidence preview for primary-source underwriting",
+        "provider_data_is_not_primary_source_verified": True,
+        "discovery": compact_candidate(row),
+        "profile": profile,
+        "quote": {
+            key: quote.get(key)
+            for key in (
+                "symbol",
+                "name",
+                "price",
+                "marketCap",
+                "timestamp",
+                "exchange",
+                "yearHigh",
+                "yearLow",
+                "volume",
+                "avgVolume",
+            )
+            if isinstance(quote, Mapping) and key in quote
+        },
+        "annual_estimates": _project_rows(estimates, estimate_fields, limit=6),
+        "income_annual": _project_rows(income_annual, income_fields, limit=4),
+        "income_quarterly": _project_rows(income_quarterly, income_fields, limit=8),
+        "balance_latest": _project_rows(
+            balance_quarterly or balance_annual, balance_fields, limit=2
+        ),
+        "cash_flow_annual": _project_rows(cash_flow_annual, cash_flow_fields, limit=4),
+        "cash_flow_quarterly": _project_rows(cash_flow_quarterly, cash_flow_fields, limit=8),
+        "cash_flow_ttm_preview": _cash_flow_ttm_preview(cash_flow_quarterly),
+        "key_metrics_ttm": dict(key_metrics_ttm[0]) if key_metrics_ttm else None,
+        "ratios_ttm": dict(ratios_ttm[0]) if ratios_ttm else None,
+        "peer_symbols": peers[:10],
+        "raw_evidence_paths": evidence_paths,
+        "required_next_checks": [
+            "corporate_action_preflight",
+            "accession_specific_sec_or_official_ir_verification",
+            "quarter_and_full_year_period_separation",
+            "standard_fcf_primary_source_reconstruction",
+            "independent_forecast_bridge",
+            "peer_basis_alignment",
+            "sector_and_cycle_normalization",
+        ],
+    }
+    path = output_dir / f"{symbol}.fmp-packet.json"
+    _write_json(path, packet)
+    return path
+
+
+def execute_pipeline(
+    client: FMPClient,
+    config: Mapping[str, Any],
+    *,
+    analysis_as_of: datetime,
+    output_dir: Path,
+    include_packets: bool = True,
+) -> PipelineResult:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    audit_dir = output_dir / "audit"
+    raw_dir = output_dir / "provider"
+    packet_dir = output_dir / "candidate-packets"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    min_cap = float(config["min_market_cap"])
+    max_cap = float(config["max_market_cap"])
+    min_price = float(config["min_price"])
+
+    universe_rows, enumeration_audit = collect_listing_universe(
+        client,
+        min_market_cap=min_cap,
+        max_market_cap=max_cap,
+        min_price=min_price,
+        page_limit=int(config["company_screener_limit"]),
+        minimum_band_width=float(config["minimum_market_cap_band_width"]),
+        maximum_depth=int(config["maximum_market_cap_band_depth"]),
+    )
+    if not universe_rows:
+        raise ValueError("FMP company screener returned no normalized listing rows")
+    _write_json(audit_dir / "listing-enumeration-audit.json", enumeration_audit)
+
+    bulk_endpoints = dict(config.get("bulk_endpoints") or {})
+    bulk_rows: dict[str, list[dict[str, Any]]] = {}
+    year = analysis_as_of.year - 1
+    for name, params in (
+        ("ratios_ttm", {}),
+        ("key_metrics_ttm", {}),
+        ("income_growth", {"year": year, "period": "annual"}),
+    ):
+        endpoint = bulk_endpoints.get(name)
+        bulk_rows[name] = client.get_bulk_dataset(endpoint, **params) if endpoint else []
+        _write_json(raw_dir / f"{name}.json", bulk_rows[name])
+    bulk_merged = merge_bulk_rows(bulk_rows)
+    enriched_universe = [
+        enrich_listing_from_bulk(row, bulk_merged.get(_symbol(row), {})) for row in universe_rows
+    ]
+
+    eod_endpoint = bulk_endpoints.get("eod")
+    bulk_liquidity = False
+    if eod_endpoint:
+        enriched_universe, bulk_liquidity = apply_bulk_liquidity(
+            client,
+            enriched_universe,
+            as_of=analysis_as_of.date(),
+            endpoint=eod_endpoint,
+            source_id=f"fmp-{eod_endpoint}-{analysis_as_of.date().isoformat()}",
+            required_days=int(config["minimum_average_volume_period_days"]),
+        )
+
+    estimate_source = f"fmp-analyst-estimates-{analysis_as_of.date().isoformat()}"
+    universe_symbols = {_symbol(row) for row in enriched_universe}
+    bulk_estimates, bulk_estimate_audit = collect_bulk_annual_estimates(
+        client,
+        endpoint=_text(bulk_endpoints.get("analyst_estimates")),
+        universe_symbols=universe_symbols,
+        analysis_as_of=analysis_as_of,
+        year_count=int(config["bulk_estimate_years"]),
+    )
+    _write_json(audit_dir / "bulk-estimates-audit.json", bulk_estimate_audit)
+
+    bulk_coverage = float(bulk_estimate_audit.get("coverage_pct") or 0.0)
+    use_bulk_estimates = bool(
+        bulk_estimates and bulk_coverage >= float(config["bulk_estimate_minimum_coverage_pct"])
+    )
+    if use_bulk_estimates:
+        estimate_frame = [row for row in enriched_universe if _symbol(row) in bulk_estimates]
+        estimates_by_symbol = bulk_estimates
+        estimate_acquisition_mode = "analyst_estimates_bulk"
+    else:
+        estimate_frame = diversified_seed(enriched_universe, int(config["pre_enrichment_limit"]))
+        estimates_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for row in estimate_frame:
+            symbol = _symbol(row)
+            estimates_by_symbol[symbol] = client.get_analyst_estimates(
+                symbol, period="annual", limit=6
+            )
+        estimate_acquisition_mode = "bounded_per_symbol_fallback"
+
+    normalized_estimates = normalize_estimate_frame(
+        estimate_frame,
+        estimates_by_symbol,
+        analysis_as_of=analysis_as_of,
+        source_id=estimate_source,
+        config=config,
+    )
+
+    if not bulk_liquidity:
+        liquidity_targets = select_liquidity_targets(
+            normalized_estimates,
+            config,
+            limit=int(config["exact_liquidity_limit"]),
+        )
+        normalized_estimates = apply_symbol_liquidity(
+            client,
+            normalized_estimates,
+            as_of=analysis_as_of.date(),
+            source_id=f"fmp-historical-eod-{analysis_as_of.date().isoformat()}",
+            limit=int(config["exact_liquidity_limit"]),
+            required_days=int(config["minimum_average_volume_period_days"]),
+            target_symbols=liquidity_targets,
+        )
+    else:
+        liquidity_targets = [_symbol(row) for row in normalized_estimates]
+
+    seed = estimate_frame
+    universe_sha = _write_jsonl(audit_dir / "universe.jsonl", enriched_universe)
+    enriched_sha = _write_jsonl(audit_dir / "enriched-estimates.jsonl", normalized_estimates)
+
+    lanes: dict[str, list[dict[str, Any]]] = {lane: [] for lane in ALLOWED_LANES}
+    for row in normalized_estimates:
+        for lane in lane_memberships(row, config):
+            lanes[lane].append(dict(row))
+    for lane, rows in lanes.items():
+        _write_jsonl(audit_dir / f"lane-{lane}.jsonl", rows)
+
+    pool, discovery_audit = build_pool(
+        universe_rows=enriched_universe,
+        lane_rows=lanes,
+        analysis_as_of=analysis_as_of.isoformat(),
+        source_ids=[estimate_source],
+        per_lane=int(config["provider_prefilter_per_lane"]),
+        max_pool=int(config["provider_prefilter_pool_size"]),
+        minimum_pool=int(config["provider_prefilter_minimum_pool"]),
+        requested_min_market_cap=min_cap,
+        requested_max_market_cap=max_cap,
+        provider_exhausted=True,
+    )
+    pool_sha = _write_jsonl(audit_dir / "provider-prefilter-pool.jsonl", pool)
+    discovery_audit.update(
+        {
+            "artifact_path": "provider-prefilter-pool.jsonl",
+            "artifact_sha256": pool_sha,
+            "universe_artifact_sha256": universe_sha,
+            "enriched_estimates_sha256": enriched_sha,
+            "estimate_acquisition_mode": estimate_acquisition_mode,
+            "bulk_estimate_audit": bulk_estimate_audit,
+            "exact_liquidity_target_count": len(liquidity_targets),
+        }
+    )
+    _write_json(audit_dir / "provider-prefilter-audit.json", discovery_audit)
+
+    screen_config = dict(SCREEN_DEFAULTS)
+    screen_config.update(config)
+    screen_config["max_deep_dive_candidates"] = int(config["max_deep_dive_candidates"])
+    universe_decisions, candidate_decisions, audit, selected, queue = run_layered(
+        enriched_universe,
+        pool,
+        screen_config,
+        analysis_as_of=analysis_as_of.isoformat(),
+        universe_source_ids=[f"fmp-company-screener-{analysis_as_of.date().isoformat()}"],
+        candidate_source_ids=[estimate_source],
+        candidate_generation_mode="provider_prefilter",
+        retrieval_min_market_cap=min_cap,
+        retrieval_max_market_cap=max_cap,
+        requested_min_market_cap=min_cap,
+        requested_max_market_cap=max_cap,
+        retrieval_scope_explicit=True,
+        candidate_pool_exhausted=True,
+        provider_reported_total=None,
+        pages_fetched=int(enumeration_audit["query_count"]),
+        pagination_exhausted=bool(enumeration_audit["enumeration_verified"]),
+        band_audit=enumeration_audit["bands"],
+        discovery_audit=discovery_audit,
+    )
+
+    universe_decisions_path = audit_dir / "universe-audit-results.jsonl"
+    candidate_decisions_path = audit_dir / "broad-screen-results.jsonl"
+    queue_path = audit_dir / "enrichment-queue.json"
+    universe_decisions_path.write_text(
+        "".join(_canonical_line(row) for row in universe_decisions), encoding="utf-8"
+    )
+    candidate_decisions_path.write_text(
+        "".join(_canonical_line(row) for row in candidate_decisions), encoding="utf-8"
+    )
+    _write_json(queue_path, queue)
+    audit["universe"].update(
+        {
+            "artifact_path": universe_decisions_path.name,
+            "artifact_sha256": hashlib.sha256(universe_decisions_path.read_bytes()).hexdigest(),
+        }
+    )
+    audit["candidate_pool"].update(
+        {
+            "artifact_path": candidate_decisions_path.name,
+            "artifact_sha256": hashlib.sha256(candidate_decisions_path.read_bytes()).hexdigest(),
+        }
+    )
+    audit["enrichment"].update(
+        {
+            "artifact_path": queue_path.name,
+            "artifact_sha256": hashlib.sha256(queue_path.read_bytes()).hexdigest(),
+        }
+    )
+    _write_json(audit_dir / "broad-screen-audit.json", audit)
+
+    selected_rows = {_symbol(row): row for row in pool if _symbol(row) in set(selected)}
+    packet_paths: list[str] = []
+    if include_packets:
+        for symbol in selected:
+            packet_paths.append(str(build_fmp_packet(client, selected_rows[symbol], packet_dir)))
+
+    pool_status = str(audit.get("candidate_pool_status") or "")
+    selection_outcome = str(audit.get("selection_outcome") or "")
+    if selected and pool_status == "sufficient":
+        status = "ready_for_underwriting"
+        action = "complete_primary_source_underwriting"
+    elif not selected and pool_status == "no_qualifying_candidates":
+        status = "no_candidates_in_scoped_pool"
+        action = "publish_scoped_no_candidates"
+    else:
+        status = "needs_enrichment"
+        action = "repair_discovery_or_enrichment_contract"
+
+    next_action = {
+        "runtime": runtime_metadata(),
+        "action": action,
+        "symbols": selected,
+        "user_confirmation_required": False,
+        "read_only": [
+            "run-summary.json",
+            "audit/broad-screen-audit.json",
+            "candidate-packets/*.fmp-packet.json",
+        ],
+        "do_not_read_bulk_provider_payloads_into_model_context": True,
+        "required_after_underwriting": [
+            "manage_run_state.py assemble",
+            "evaluate_candidates.py --strict --require-final",
+            "prepublish_audit.py",
+            "bundle_run_artifacts.py",
+        ],
+    }
+    _write_json(output_dir / "NEXT_ACTION.json", next_action)
+
+    summary = {
+        "runtime": runtime_metadata(),
+        "run_id": output_dir.name,
+        "status": status,
+        "analysis_as_of": analysis_as_of.isoformat(),
+        "conclusion_scope": audit.get("conclusion_scope"),
+        "scope_complete": bool(audit.get("scope", {}).get("scope_complete")),
+        "listing_enumeration_verified": bool(enumeration_audit["enumeration_verified"]),
+        "listing_query_count": int(enumeration_audit["query_count"]),
+        "universe_count": len(enriched_universe),
+        "seed_count": len(seed),
+        "normalized_estimate_count": len(normalized_estimates),
+        "estimate_acquisition_mode": estimate_acquisition_mode,
+        "bulk_estimate_coverage_pct": bulk_coverage,
+        "exact_liquidity_target_count": len(liquidity_targets),
+        "provider_prefilter_pool_count": len(pool),
+        "selected_symbols": selected,
+        "selected_candidates": [compact_candidate(selected_rows[symbol]) for symbol in selected],
+        "enrichment_queue_count": len(queue),
+        "candidate_pool_status": pool_status,
+        "selection_outcome": selection_outcome,
+        "bulk_liquidity_used": bulk_liquidity,
+        "lane_counts": {lane: len(rows) for lane, rows in lanes.items()},
+        "provider_diagnostics": client.diagnostics(),
+        "artifacts": {
+            "run_summary": "run-summary.json",
+            "next_action": "NEXT_ACTION.json",
+            "listing_enumeration_audit": "audit/listing-enumeration-audit.json",
+            "provider_prefilter_audit": "audit/provider-prefilter-audit.json",
+            "broad_screen_audit": "audit/broad-screen-audit.json",
+            "candidate_packets": [str(Path(path).relative_to(output_dir)) for path in packet_paths],
+            "raw_provider_dir": "provider",
+        },
+    }
+    _write_json(output_dir / "run-summary.json", summary)
+    exit_code = 0 if status in {"ready_for_underwriting", "no_candidates_in_scoped_pool"} else 2
+    return PipelineResult(summary=summary, exit_code=exit_code)
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("reports/us-undervalued-growth-screener")
+    )
+    parser.add_argument("--analysis-as-of", help="ISO-8601 timestamp; defaults to now")
+    parser.add_argument("--api-key", help="Defaults to FMP_API_KEY")
+    parser.add_argument("--cache-path", type=Path)
+    parser.add_argument("--raw-store-dir", type=Path)
+    parser.add_argument("--max-api-calls", type=int)
+    parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--skip-candidate-packets", action="store_true")
+    parser.add_argument("--version", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.version:
+        print(json.dumps(runtime_metadata(), sort_keys=True))
+        return 0
+    try:
+        config = load_config(args.config)
+        analysis_as_of = (
+            datetime.fromisoformat(args.analysis_as_of.replace("Z", "+00:00"))
+            if args.analysis_as_of
+            else datetime.now(timezone.utc)
+        )
+        if analysis_as_of.tzinfo is None:
+            analysis_as_of = analysis_as_of.replace(tzinfo=timezone.utc)
+        run_id = f"run-{analysis_as_of.astimezone(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        output_dir = args.output_dir / run_id
+        cache_cfg = dict(config.get("cache") or {})
+        cache_path = args.cache_path or Path(
+            str(cache_cfg.get("path", ".cache/us-garp/fmp-cache.sqlite3"))
+        )
+        raw_store_dir = args.raw_store_dir or output_dir / "provider-raw"
+        max_calls = args.max_api_calls or int(config["max_api_calls"])
+        with FMPClient(
+            api_key=args.api_key,
+            max_api_calls=max_calls,
+            cache_path=cache_path,
+            raw_store_dir=raw_store_dir,
+            offline=args.offline,
+        ) as client:
+            result = execute_pipeline(
+                client,
+                config,
+                analysis_as_of=analysis_as_of,
+                output_dir=output_dir,
+                include_packets=not args.skip_candidate_packets,
+            )
+        encoded = json.dumps(result.summary, ensure_ascii=False, sort_keys=True)
+        max_bytes = int(config.get("compact_stdout_max_bytes", 20_000))
+        if len(encoded.encode("utf-8")) > max_bytes:
+            compact = dict(result.summary)
+            compact.pop("selected_candidates", None)
+            compact["stdout_compacted"] = True
+            compact["selected_candidate_details_path"] = str(output_dir / "run-summary.json")
+            encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+        print(encoded)
+        return result.exit_code
+    except ApiCallBudgetExceeded as exc:
+        print(
+            json.dumps(
+                {
+                    "runtime": runtime_metadata(),
+                    "status": "provider_budget_exhausted",
+                    "error": str(exc),
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(
+            json.dumps(
+                {"runtime": runtime_metadata(), "status": "failed", "error": str(exc)},
+                sort_keys=True,
+            )
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

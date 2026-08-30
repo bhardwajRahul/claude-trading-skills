@@ -115,6 +115,7 @@ A comprehensive catalog of all 73 Claude Trading Skills organized by category. B
 | `uptrend-analyzer` | `workflow_step` | — |
 | `us-market-bubble-detector` | `standalone` | Produces an independent market bubble-risk assessment on demand. |
 | `us-stock-analysis` | `standalone` | Produces a self-contained research report for a requested US equity. |
+| `us-undervalued-growth-screener` | `standalone` | Executes an end-to-end US GARP screen from a minimal request. In Claude Code it runs a local direct-FMP pipeline that keeps bulk payloads out of model context, then completes selected SEC/IR underwriting and publishes only a scope-correct audited result. |
 | `value-dividend-screener` | `workflow_step` | — |
 | `vcp-screener` | `workflow_step` | — |
 | `weekly-performance-digest` | `standalone` | Generates a standalone weekly digest from supplied closed-trade records. |
@@ -132,6 +133,7 @@ A comprehensive catalog of all 73 Claude Trading Skills organized by category. B
 | **[Stockbee Exhaustion Hammer Screener]({{ '/en/skills/stockbee-exhaustion-hammer-screener/' | relative_url }})** | Stockbee-style selling-exhaustion hammer screening for liquid stocks with prior momentum, pullback depth, undercut/reclaim behavior, long lower-wick reversal geometry, and risk-distance filters. Candidate generation only | <span class="badge badge-api">FMP Required</span> <span class="badge badge-optional">Local JSON Optional</span> |
 | **[FinViz Screener]({{ '/en/skills/finviz-screener/' | relative_url }})** | Translates natural language (Japanese/English) into FinViz filter URLs. 500+ filter codes across fundamentals, technicals, and descriptives. **Theme cross-screening** (30+ themes × 268 sub-themes) for narrative-based searches like "AI × Logistics" or "Data Centers × Power". Opens results in Chrome | <span class="badge badge-free">No API</span> <span class="badge badge-optional">FINVIZ Optional</span> |
 | **Value Dividend Screener** | Multi-phase dividend stock screening: value characteristics (P/E, P/B), income (yield), growth (3-year trends), sustainability, and quality scoring | <span class="badge badge-api">FMP Required</span> <span class="badge badge-optional">FINVIZ Optional</span> |
+| **[US Undervalued Growth Screener]({{ '/en/skills/us-undervalued-growth-screener/' | relative_url }})** | Claude Code-native GARP screen for US small/mid caps: direct-FMP discovery pipeline with local cache, FY1 estimate normalization, verified liquidity, forward same-basis valuation, SBC-adjusted FCF, prepublication audit, and a self-contained evidence bundle | <span class="badge badge-optional">FMP Recommended</span> |
 | **Dividend Growth Pullback Screener** | Finds dividend growth stocks (12%+ annual growth, 1.5%+ yield) at oversold technical levels (RSI <= 40). Two-stage FINVIZ + FMP pipeline | <span class="badge badge-api">FMP Required</span> <span class="badge badge-optional">FINVIZ Optional</span> |
 | **Earnings Trade Analyzer** | Scores post-earnings stocks using 5 weighted factors: Gap Size (25%), Pre-Earnings Trend (30%), Volume Trend (20%), MA200 Position (15%), MA50 Position (10%). A/B/C/D grades | <span class="badge badge-api">FMP Required</span> |
 | **PEAD Screener** | Screens for Post-Earnings Announcement Drift patterns using weekly candle analysis. Stage-based monitoring: MONITORING, SIGNAL_READY, BREAKOUT, EXPIRED | <span class="badge badge-api">FMP Required</span> |
@@ -251,6 +253,7 @@ A comprehensive catalog of all 73 Claude Trading Skills organized by category. B
 
 ### I want dividend income
 
+- **[US Undervalued Growth Screener]({{ '/en/skills/us-undervalued-growth-screener/' | relative_url }})** -- Audited GARP screen for US small/mid caps
 - **Value Dividend Screener** -- High-yield value stocks with sustainability checks
 - **Dividend Growth Pullback Screener** -- Growth-focused dividend stocks at oversold entry points
 - **Kanchi Dividend SOP** -- Systematic 5-step dividend stock selection process
@@ -372,5 +375,6 @@ A comprehensive catalog of all 73 Claude Trading Skills organized by category. B
 | Futures Position Sizer | -- | -- | -- |
 | FXMacroData Calendar | -- | -- | -- |
 | Residual Edge Analyzer | -- | -- | -- |
+| US Undervalued Growth Screener | -- | -- | -- |
 
 "--" means not required. "Optional" means functionality is enhanced but the skill works without it.
