@@ -19,46 +19,37 @@ AS_OF = datetime(2026, 8, 22, tzinfo=timezone.utc)
 
 
 class EconomicScopeTests(unittest.TestCase):
-    CONFIG = {
-        "bulk_estimate_minimum_coverage_pct": 20.0,
-        "economic_scope_complete_minimum_coverage_pct": 99.0,
-    }
-
-    def test_bulk_route_just_above_20pct_is_not_complete(self) -> None:
-        self.assertFalse(
-            PIPELINE.economic_scope_complete(
-                estimate_acquisition_mode="analyst_estimates_bulk",
-                bulk_coverage_pct=25.0,
-                config=self.CONFIG,
-            )
+    def _complete(self, mode: str, covered: int, universe: int) -> bool:
+        return PIPELINE.economic_scope_complete(
+            estimate_acquisition_mode=mode,
+            covered_symbol_count=covered,
+            universe_symbol_count=universe,
         )
 
-    def test_partial_bulk_coverage_is_not_complete(self) -> None:
-        self.assertFalse(
-            PIPELINE.economic_scope_complete(
-                estimate_acquisition_mode="analyst_estimates_bulk",
-                bulk_coverage_pct=60.0,
-                config=self.CONFIG,
-            )
-        )
+    def test_99pct_coverage_is_not_complete(self) -> None:
+        self.assertFalse(self._complete("analyst_estimates_bulk", 99, 100))
 
-    def test_full_bulk_coverage_is_complete(self) -> None:
-        self.assertTrue(
-            PIPELINE.economic_scope_complete(
-                estimate_acquisition_mode="analyst_estimates_bulk",
-                bulk_coverage_pct=100.0,
-                config=self.CONFIG,
-            )
-        )
+    def test_9999_of_10000_is_not_complete(self) -> None:
+        self.assertFalse(self._complete("analyst_estimates_bulk", 9999, 10000))
+
+    def test_exact_full_coverage_is_complete(self) -> None:
+        self.assertTrue(self._complete("analyst_estimates_bulk", 2371, 2371))
 
     def test_per_symbol_fallback_is_never_complete(self) -> None:
-        self.assertFalse(
-            PIPELINE.economic_scope_complete(
-                estimate_acquisition_mode="bounded_per_symbol_fallback",
-                bulk_coverage_pct=100.0,
-                config=self.CONFIG,
-            )
-        )
+        self.assertFalse(self._complete("bounded_per_symbol_fallback", 2371, 2371))
+
+    def test_empty_universe_is_not_complete(self) -> None:
+        self.assertFalse(self._complete("analyst_estimates_bulk", 0, 0))
+
+    def test_completeness_is_not_configurable(self) -> None:
+        # No ratio knob: the function takes no config, and the old key is gone
+        # from DEFAULT_CONFIG, so a user cannot lower the bar back to 20%.
+        import inspect
+
+        params = inspect.signature(PIPELINE.economic_scope_complete).parameters
+        self.assertNotIn("config", params)
+        self.assertNotIn("bulk_coverage_pct", params)
+        self.assertNotIn("economic_scope_complete_minimum_coverage_pct", PIPELINE.DEFAULT_CONFIG)
 
 
 def _row(date: str, fiscal_year: str, eps: float, **extra) -> dict:
@@ -122,11 +113,48 @@ class VerifiedActualTests(unittest.TestCase):
         self.assertIsNone(out["latest_actual_eps"])
         self.assertEqual(out["fy0_consensus_eps"], 2.0)  # look-ahead row never becomes FY0
 
-    def test_marked_actual_before_analysis_as_of_is_used(self) -> None:
-        rows = [_row("2025-12-31", "2025", 2.24, isActual=True)] + self.SERIES[1:]
+    def test_marked_actual_with_publication_timestamp_is_used(self) -> None:
+        rows = [
+            _row("2025-12-31", "2025", 2.24, isActual=True, publishedDate="2026-02-27 16:05:00")
+        ] + self.SERIES[1:]
         out = _normalize(rows)
         self.assertEqual(out["latest_actual_eps"], 2.24)
+        self.assertTrue(out["latest_actual_verified"])
+        self.assertEqual(out["latest_actual_basis"], "provider_marked_actual")
+        self.assertEqual(out["latest_actual_source_ids"], ["estimate-source"])
         self.assertEqual(out["growth_pattern"], "trough_recovery")
+
+    def test_marked_actual_without_publication_timestamp_is_rejected(self) -> None:
+        rows = [_row("2025-12-31", "2025", 2.24, isActual=True)] + self.SERIES[1:]
+        out = _normalize(rows)
+        self.assertIsNone(out["latest_actual_eps"])
+        self.assertFalse(out["latest_actual_verified"])
+        self.assertIsNone(out["latest_actual_basis"])
+        self.assertEqual(out["latest_actual_source_ids"], [])
+
+    def test_historical_as_of_between_period_end_and_publication(self) -> None:
+        # Period ended 2025-12-31, published 2026-02-27, but we are replaying
+        # as of 2026-01-05: the actual was NOT public yet -> no actual fields.
+        rows = [
+            _row("2025-12-31", "2025", 2.24, isActual=True, publishedDate="2026-02-27 16:05:00"),
+            _row("2026-12-31", "2026", 1.8),
+            _row("2027-12-31", "2027", 2.5),
+            _row("2028-12-31", "2028", 2.6),
+        ]
+        out = NORMALIZER.normalize_symbol(
+            "T",
+            rows,
+            {"symbol": "T", "price": 40.0},
+            analysis_as_of=datetime(2026, 1, 5, tzinfo=timezone.utc),
+            estimate_as_of=datetime(2026, 1, 4, tzinfo=timezone.utc),
+            source_ids=["estimate-source"],
+            minimum_analysts=2,
+            max_dispersion_pct=100.0,
+            max_fy1_horizon_days=430,
+            forward_pe_tolerance_pct=3.0,
+        )
+        self.assertIsNone(out["latest_actual_eps"])
+        self.assertFalse(out["latest_actual_verified"])
 
     def test_apply_verified_actual_eps_rederives_growth_basis(self) -> None:
         base = _normalize(self.SERIES)
@@ -208,6 +236,20 @@ class VerifiedAnnualActualParsingTests(unittest.TestCase):
         ]
         eps, end = PIPELINE._verified_annual_actual(statements, analysis_as_of=AS_OF)
         self.assertEqual((eps, end), (2.24, "2025-12-31"))
+
+    def test_filing_date_fallback_is_gone_and_date_only_rejected(self) -> None:
+        date_only = [
+            {"period": "FY", "date": "2025-12-31", "acceptedDate": "2026-02-27", "epsDiluted": 2.24}
+        ]
+        self.assertEqual(
+            PIPELINE._verified_annual_actual(date_only, analysis_as_of=AS_OF), (None, None)
+        )
+        filing_only = [
+            {"period": "FY", "date": "2025-12-31", "filingDate": "2026-02-27", "epsDiluted": 2.24}
+        ]
+        self.assertEqual(
+            PIPELINE._verified_annual_actual(filing_only, analysis_as_of=AS_OF), (None, None)
+        )
 
     def test_period_ended_but_not_yet_filed_is_rejected(self) -> None:
         statements = [

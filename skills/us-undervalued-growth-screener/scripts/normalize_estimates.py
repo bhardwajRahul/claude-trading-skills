@@ -156,6 +156,10 @@ def _period_record(row: Mapping[str, Any]) -> dict[str, Any] | None:
         "revenue_analyst_count": _integer(row.get("numAnalystsRevenue"))
         or _integer(row.get("num_analysts_revenue")),
         "is_actual": bool(is_actual),
+        "published_at": _text(row.get("publishedDate"))
+        or _text(row.get("published_at"))
+        or _text(row.get("updatedAt"))
+        or None,
     }
 
 
@@ -169,15 +173,30 @@ def _latest_actual_period(
     date at or before ``analysis_as_of``); this helper only honours explicit
     provider actual markers and never treats a prior-year estimate as actual.
     """
+
     # Fail closed: only rows the provider explicitly marks as actuals count,
-    # and only when their period has already ended. An unmarked prior-year
-    # analyst-estimate row is consensus, not a reported figure, and a marked
-    # row dated after analysis_as_of would be look-ahead.
+    # and only when (a) their period has already ended AND (b) the row carries
+    # a publication timestamp at or before analysis_as_of. Without a provable
+    # publication time, a CURRENT provider snapshot replayed against a
+    # HISTORICAL analysis_as_of would leak an actual that was not yet public
+    # on that date (e.g. FY ended 2025-12-31, as-of 2026-01-05, filed
+    # 2026-02-27). An unmarked prior-year row is consensus, never an actual.
+    def _published_before(record: Mapping[str, Any]) -> bool:
+        raw = _text(record.get("published_at"))
+        if not raw:
+            return False
+        try:
+            published = _parse_date(raw, "published_at")
+        except ValueError:
+            return False
+        return published <= analysis_as_of
+
     marked_actual = [
         record
         for record in periods
         if record.get("is_actual")
         and _parse_date(record["period_end"], "period_end") <= analysis_as_of
+        and _published_before(record)
     ]
     if marked_actual:
         return max(marked_actual, key=lambda record: str(record["period_end"]))
@@ -454,6 +473,13 @@ def normalize_symbol(
             if latest_actual_eps is not None
             else None,
             "latest_actual_period_end": latest_actual_period_end,
+            "latest_actual_verified": latest_actual_period is not None,
+            "latest_actual_basis": "provider_marked_actual"
+            if latest_actual_period is not None
+            else None,
+            "latest_actual_source_ids": list(source_ids)
+            if latest_actual_period is not None
+            else [],
             "fy1_eps_below_latest_actual": fy1_eps_below_latest_actual,
             "fy0_consensus_eps": round(fy0_consensus_eps, 6)
             if fy0_consensus_eps is not None

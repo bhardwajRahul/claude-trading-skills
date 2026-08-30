@@ -40,10 +40,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "maximum_market_cap_band_depth": 12,
     "bulk_estimate_years": 5,
     "bulk_estimate_minimum_coverage_pct": 20.0,
-    # Economic scope is "complete" only when bulk estimates covered (nearly)
-    # the whole listing universe. Route selection above uses the much lower
-    # bulk_estimate_minimum_coverage_pct; the two must never be conflated.
-    "economic_scope_complete_minimum_coverage_pct": 99.0,
     "pre_enrichment_limit": 180,
     "seed_limit_cap": 200,
     "quality_probe_limit": 35,
@@ -734,18 +730,21 @@ def compute_effective_seed_limit(
 
 
 def economic_scope_complete(
-    *, estimate_acquisition_mode: str, bulk_coverage_pct: float, config: Mapping[str, Any]
+    *, estimate_acquisition_mode: str, covered_symbol_count: int, universe_symbol_count: int
 ) -> bool:
-    """True only when bulk estimates covered the listing universe.
+    """True only when bulk estimates covered EVERY listing-universe symbol.
 
+    Completeness is an exact symbol-count equality, deliberately not a
+    configurable percentage: any ratio threshold (99%, 99.99%, or a user
+    lowering it to 20%) still declares "complete / exhausted" while uncovered
+    symbols remain, which is the misstatement this field exists to prevent.
     Using the bulk route (allowed from ``bulk_estimate_minimum_coverage_pct``,
-    default 20%) says nothing about completeness; a 25%-covered bulk run is a
-    bounded economic screen exactly like the per-symbol fallback.
+    20%) says nothing about completeness.
     """
-    threshold = float(config.get("economic_scope_complete_minimum_coverage_pct", 99.0))
     return (
         estimate_acquisition_mode == "analyst_estimates_bulk"
-        and float(bulk_coverage_pct) >= threshold
+        and int(universe_symbol_count) > 0
+        and int(covered_symbol_count) >= int(universe_symbol_count)
     )
 
 
@@ -771,9 +770,15 @@ def _verified_annual_actual(
         if (_text(raw.get("period")) or "FY").upper() != "FY":
             continue
         period_end = _text(raw.get("date"))
-        accepted = _text(raw.get("acceptedDate")) or _text(raw.get("filingDate"))
+        # Only acceptedDate qualifies, and only with a time-of-day component:
+        # a bare date (or the filingDate field, which is date-only) cannot
+        # prove the filing preceded an intraday analysis_as_of, so it is
+        # treated as unknown and rejected (fail closed).
+        accepted = _text(raw.get("acceptedDate"))
         eps = _first_number(raw, "epsDiluted", "eps")
         if not period_end or not accepted or eps is None:
+            continue
+        if len(accepted.strip()) < 16:
             continue
         try:
             end_dt = datetime.fromisoformat(period_end[:10]).replace(tzinfo=timezone.utc)
@@ -1520,8 +1525,9 @@ def execute_pipeline(
         actual_source_id=f"fmp-income-statement-annual-{analysis_as_of.date().isoformat()}",
     )
     _write_json(audit_dir / "quality-probe-audit.json", quality_probe_audit)
-    # Verified actuals can change growth_pattern (e.g. trough_recovery), which
-    # changes lane membership; recompute so pool tags match the final lane.
+    # growth_pattern is fixed at normalization (consensus basis) and the probe
+    # never relabels it; the recompute below is defensive so pool lane tags
+    # always match what lane_memberships would produce for the final rows.
     lane_membership_map = {
         _symbol(row): lane_memberships(row, config) for row in normalized_estimates
     }
@@ -1574,8 +1580,8 @@ def execute_pipeline(
             "estimate_seed_exhausted": True,
             "economic_candidate_universe_exhausted": economic_scope_complete(
                 estimate_acquisition_mode=estimate_acquisition_mode,
-                bulk_coverage_pct=bulk_coverage,
-                config=config,
+                covered_symbol_count=int(bulk_estimate_audit.get("covered_symbol_count") or 0),
+                universe_symbol_count=int(bulk_estimate_audit.get("universe_symbol_count") or 0),
             ),
         }
     )
@@ -1658,8 +1664,8 @@ def execute_pipeline(
     )
     economic_screen_scope_complete = economic_scope_complete(
         estimate_acquisition_mode=estimate_acquisition_mode,
-        bulk_coverage_pct=bulk_coverage,
-        config=config,
+        covered_symbol_count=int(bulk_estimate_audit.get("covered_symbol_count") or 0),
+        universe_symbol_count=int(bulk_estimate_audit.get("universe_symbol_count") or 0),
     )
     old_scope_complete = bool(audit.get("scope", {}).get("scope_complete"))
 
