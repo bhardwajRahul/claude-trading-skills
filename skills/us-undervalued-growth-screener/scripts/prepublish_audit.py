@@ -87,8 +87,17 @@ def _verify_artifact(section: Mapping[str, Any], root: Path, label: str, errors:
         return
     path = _safe_path(root, path_text)
     if not path.is_file():
-        errors.append(f"{label} artifact is missing: {path_text}")
-        return
+        # Discovery artifacts written by run_pipeline are referenced relative
+        # to the audit directory; accept that base as well so a run root and
+        # its audit/ subdirectory both resolve.
+        fallback = (
+            _safe_path(root, f"audit/{path_text}") if not path_text.startswith("audit/") else None
+        )
+        if fallback is not None and fallback.is_file():
+            path = fallback
+        else:
+            errors.append(f"{label} artifact is missing: {path_text}")
+            return
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
     if expected and actual != expected:
         errors.append(f"{label} SHA-256 mismatch")

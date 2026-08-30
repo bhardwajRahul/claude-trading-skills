@@ -72,5 +72,5 @@ The generated client remembers a 402/403 bulk response in the SQLite cache (`cap
 
 1. Build `market-context.json` and `global-sources.json` **before** running `run_pipeline.py`; every source `retrieved_at` must precede `analysis_as_of`.
 2. Run discovery, then `manage_run_state.py init` / `set-screening-audit` / `set-funnel --preflight-passed-count N`.
-3. Copy `audit/enrichment-queue.json` and `audit/provider-prefilter-pool.jsonl` to the run root if `prepublish_audit.py --artifact-root <run>` reports them missing (path bases differ between the state copy and the discovery audit; tracked for v3.6.2).
+3. `set-screening-audit` now copies the enrichment queue and provider-prefilter pool into `run/audit/` and rewrites their paths to the same run-relative base as the universe/candidate artifacts, and `prepublish_audit.py` also accepts audit-relative bare names, so `--artifact-root <run>` resolves every artifact from one root.
 4. Keep shared `fmp-*` source entries byte-identical across candidate ledgers and the global ledger.

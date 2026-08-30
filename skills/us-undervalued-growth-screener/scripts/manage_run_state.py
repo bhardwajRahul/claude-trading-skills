@@ -341,6 +341,31 @@ def cmd_set_screening_audit(args: argparse.Namespace) -> int:
     normalized["candidate_pool"] = _verify_and_copy_artifact(
         run_dir, candidate_section, candidate_path, "broad-screen-results.jsonl", "candidate-pool"
     )
+    # The discovery-stage artifacts (enrichment queue, provider-prefilter pool)
+    # are referenced by bare file names relative to the audit JSON. Copy them
+    # into run/audit/ and rewrite their paths to the same run-relative base as
+    # universe/candidate_pool, so prepublish_audit --artifact-root <run> resolves
+    # every artifact from one root.
+    enrichment_section = _mapping(normalized.get("enrichment"))
+    if _text(enrichment_section.get("artifact_path")):
+        enrichment_path = _resolve_artifact_argument(
+            None, enrichment_section, args.audit, label="enrichment"
+        )
+        normalized["enrichment"] = _verify_and_copy_artifact(
+            run_dir, enrichment_section, enrichment_path, enrichment_path.name, "enrichment"
+        )
+    generation_section = _mapping(normalized["candidate_pool"].get("generation_audit"))
+    if generation_section and _text(generation_section.get("artifact_path")):
+        generation_path = _resolve_artifact_argument(
+            None, generation_section, args.audit, label="candidate-pool generation"
+        )
+        normalized["candidate_pool"]["generation_audit"] = _verify_and_copy_artifact(
+            run_dir,
+            generation_section,
+            generation_path,
+            generation_path.name,
+            "candidate-pool generation",
+        )
     selected = audit.get("selected_symbols")
     if not isinstance(selected, list) or not all(
         isinstance(value, str) and value.strip() for value in selected
