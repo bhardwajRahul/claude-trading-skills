@@ -581,6 +581,9 @@ def test_current_policy_has_no_allowed_failures_and_enforces_all_tiers():
     assert entries["theme-detector"].allowed_failure is False
     assert entries["futures-position-sizer"].coverage_target == 85
     assert entries["drawdown-circuit-breaker"].coverage_target == 85
+    assert entries["position-sizer"].coverage_target == 85
+    assert entries["position-sizer"].coverage_floor == 85
+    assert entries["position-sizer"].coverage_waiver is None
     assert entries["mt5-robot-tester"].coverage_target == 70
     assert entries["options-strategy-advisor"].coverage_floor == 70
     assert entries["signal-postmortem"].coverage_floor == 40
