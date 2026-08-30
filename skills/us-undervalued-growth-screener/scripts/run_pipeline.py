@@ -300,6 +300,8 @@ def collect_listing_universe(
                 "min_market_cap": band_min,
                 "max_market_cap": band_max,
                 "row_count": len(payload),
+                # Contract 3.5 validators read `rows_fetched` per band.
+                "rows_fetched": len(payload),
                 "provider_exhausted": not saturated,
                 "depth": depth,
             }
