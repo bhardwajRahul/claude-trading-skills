@@ -23,7 +23,7 @@ from typing import Any
 
 from build_provider_prefilter_pool import ALLOWED_LANES, _lane_score, build_pool
 from fmp_client import ApiCallBudgetExceeded, FMPClient
-from normalize_estimates import normalize_symbol
+from normalize_estimates import apply_verified_actual_eps, normalize_symbol
 from screen_universe import DEFAULTS as SCREEN_DEFAULTS
 from screen_universe import _canonical_line, run_layered
 from skill_version import runtime_metadata
@@ -40,6 +40,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "maximum_market_cap_band_depth": 12,
     "bulk_estimate_years": 5,
     "bulk_estimate_minimum_coverage_pct": 20.0,
+    # Economic scope is "complete" only when bulk estimates covered (nearly)
+    # the whole listing universe. Route selection above uses the much lower
+    # bulk_estimate_minimum_coverage_pct; the two must never be conflated.
+    "economic_scope_complete_minimum_coverage_pct": 99.0,
     "pre_enrichment_limit": 180,
     "seed_limit_cap": 200,
     "quality_probe_limit": 35,
@@ -712,7 +716,7 @@ def compute_effective_seed_limit(
     pool too thin to be meaningful.
     """
     reserved = (
-        int(quality_probe_limit)
+        int(quality_probe_limit) * 2  # key-metrics-ttm + annual income statement
         + int(exact_liquidity_limit)
         + int(candidate_packet_reserve_calls)
         + int(retry_reserve_calls)
@@ -729,6 +733,22 @@ def compute_effective_seed_limit(
     return effective
 
 
+def economic_scope_complete(
+    *, estimate_acquisition_mode: str, bulk_coverage_pct: float, config: Mapping[str, Any]
+) -> bool:
+    """True only when bulk estimates covered the listing universe.
+
+    Using the bulk route (allowed from ``bulk_estimate_minimum_coverage_pct``,
+    default 20%) says nothing about completeness; a 25%-covered bulk run is a
+    bounded economic screen exactly like the per-symbol fallback.
+    """
+    threshold = float(config.get("economic_scope_complete_minimum_coverage_pct", 99.0))
+    return (
+        estimate_acquisition_mode == "analyst_estimates_bulk"
+        and float(bulk_coverage_pct) >= threshold
+    )
+
+
 def _is_foreign_private_issuer(row: Mapping[str, Any]) -> bool:
     """Heuristic FPI flag: ISIN country prefix when available, else listing country."""
     isin = _text(row.get("isin"))
@@ -740,12 +760,43 @@ def _is_foreign_private_issuer(row: Mapping[str, Any]) -> bool:
     return False
 
 
+def _verified_annual_actual(
+    statements: Sequence[Mapping[str, Any]], *, analysis_as_of: datetime
+) -> tuple[float | None, str | None]:
+    """Latest reported annual diluted EPS whose period AND filing precede analysis_as_of."""
+    best: tuple[str, float] | None = None
+    for raw in statements:
+        if not isinstance(raw, Mapping):
+            continue
+        if (_text(raw.get("period")) or "FY").upper() != "FY":
+            continue
+        period_end = _text(raw.get("date"))
+        accepted = _text(raw.get("acceptedDate")) or _text(raw.get("filingDate"))
+        eps = _first_number(raw, "epsDiluted", "eps")
+        if not period_end or not accepted or eps is None:
+            continue
+        try:
+            end_dt = datetime.fromisoformat(period_end[:10]).replace(tzinfo=timezone.utc)
+            acc_dt = datetime.fromisoformat(accepted[:19].replace(" ", "T")).replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            continue
+        if end_dt > analysis_as_of or acc_dt > analysis_as_of:
+            continue
+        if best is None or period_end > best[0]:
+            best = (period_end, float(eps))
+    return (best[1], best[0]) if best else (None, None)
+
+
 def apply_quality_probe(
     client: Any,
     rows: Sequence[Mapping[str, Any]],
     *,
     target_symbols: Sequence[str],
     source_id: str,
+    analysis_as_of: datetime | None = None,
+    actual_source_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Enrich the top-ranked lane candidates with TTM quality metrics.
 
@@ -755,6 +806,8 @@ def apply_quality_probe(
     targets = {str(value).upper() for value in target_symbols}
     attempted: list[str] = []
     resolved: list[str] = []
+    actual_resolved: list[str] = []
+    actual_calls = 0
     output: list[dict[str, Any]] = []
     for raw in rows:
         row = dict(raw)
@@ -803,6 +856,24 @@ def apply_quality_probe(
                 resolved.append(symbol)
             else:
                 row["quality_probe_resolved"] = False
+            # Verified reported EPS: one annual income-statement call, accepted
+            # at or before analysis_as_of. Without it the growth-basis fields
+            # stay fail-closed (unknown) rather than borrowing a consensus row.
+            if analysis_as_of is not None and hasattr(client, "get_income_statement"):
+                statements = client.get_income_statement(symbol, period="annual", limit=2)
+                actual_calls += 1
+                actual_eps, actual_end = _verified_annual_actual(
+                    statements or [], analysis_as_of=analysis_as_of
+                )
+                row = apply_verified_actual_eps(
+                    row,
+                    actual_eps=actual_eps,
+                    period_end=actual_end,
+                    analysis_as_of=analysis_as_of,
+                    source_ids=[actual_source_id] if actual_source_id else [],
+                )
+                if row.get("latest_actual_verified"):
+                    actual_resolved.append(symbol)
         else:
             row.setdefault("quality_probe_attempted", False)
             row.setdefault("quality_probe_resolved", False)
@@ -812,7 +883,10 @@ def apply_quality_probe(
         "resolved": resolved,
         "symbols": attempted,
         "source_id": source_id,
-        "calls_used": len(attempted),
+        "calls_used": len(attempted) + actual_calls,
+        "actual_eps_source_id": actual_source_id,
+        "actual_eps_calls": actual_calls,
+        "actual_eps_resolved": actual_resolved,
     }
     return output, audit
 
@@ -1377,7 +1451,7 @@ def execute_pipeline(
             run_salt=analysis_as_of.date().isoformat(),
             seed_limit_configured=pre_enrichment_limit,
             reserved_calls=(
-                int(config["quality_probe_limit"])
+                int(config["quality_probe_limit"]) * 2
                 + int(config["exact_liquidity_limit"])
                 + int(config["candidate_packet_reserve_calls"])
                 + int(config["retry_reserve_calls"])
@@ -1442,8 +1516,15 @@ def execute_pipeline(
         normalized_estimates,
         target_symbols=quality_probe_targets,
         source_id=quality_probe_source_id,
+        analysis_as_of=analysis_as_of,
+        actual_source_id=f"fmp-income-statement-annual-{analysis_as_of.date().isoformat()}",
     )
     _write_json(audit_dir / "quality-probe-audit.json", quality_probe_audit)
+    # Verified actuals can change growth_pattern (e.g. trough_recovery), which
+    # changes lane membership; recompute so pool tags match the final lane.
+    lane_membership_map = {
+        _symbol(row): lane_memberships(row, config) for row in normalized_estimates
+    }
 
     enriched_sha = _write_jsonl(audit_dir / "enriched-estimates.jsonl", normalized_estimates)
 
@@ -1491,8 +1572,11 @@ def execute_pipeline(
             "quality_probe": quality_probe_audit,
             "listing_provider_exhausted": True,
             "estimate_seed_exhausted": True,
-            "economic_candidate_universe_exhausted": estimate_acquisition_mode
-            == "analyst_estimates_bulk",
+            "economic_candidate_universe_exhausted": economic_scope_complete(
+                estimate_acquisition_mode=estimate_acquisition_mode,
+                bulk_coverage_pct=bulk_coverage,
+                config=config,
+            ),
         }
     )
     if seed_audit is not None:
@@ -1572,9 +1656,10 @@ def execute_pipeline(
     valid_estimate_coverage_pct = (
         valid_estimate_count / listing_universe_count * 100.0 if listing_universe_count else 0.0
     )
-    economic_screen_scope_complete = bool(
-        estimate_acquisition_mode == "analyst_estimates_bulk"
-        and bulk_coverage >= float(config["bulk_estimate_minimum_coverage_pct"])
+    economic_screen_scope_complete = economic_scope_complete(
+        estimate_acquisition_mode=estimate_acquisition_mode,
+        bulk_coverage_pct=bulk_coverage,
+        config=config,
     )
     old_scope_complete = bool(audit.get("scope", {}).get("scope_complete"))
 

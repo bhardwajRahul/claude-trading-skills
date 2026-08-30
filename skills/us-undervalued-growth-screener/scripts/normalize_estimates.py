@@ -162,23 +162,25 @@ def _period_record(row: Mapping[str, Any]) -> dict[str, Any] | None:
 def _latest_actual_period(
     periods: Sequence[Mapping[str, Any]], analysis_as_of: datetime
 ) -> Mapping[str, Any] | None:
-    """Return the period record representing the most recent actual annual EPS.
+    """Return the most recent provider-marked actual annual EPS row, else None.
 
-    Prefers rows the provider explicitly marks as actuals; falls back to the
-    most recent period whose period_end is on/before ``analysis_as_of`` (the
-    provider's own trailing FY0 estimate row, which is the closest available
-    proxy for the reported actual). Returns None when neither is available.
+    Verified reported figures normally arrive through
+    ``apply_verified_actual_eps`` (annual income statement with an accepted
+    date at or before ``analysis_as_of``); this helper only honours explicit
+    provider actual markers and never treats a prior-year estimate as actual.
     """
-    marked_actual = [record for record in periods if record.get("is_actual")]
-    if marked_actual:
-        return max(marked_actual, key=lambda record: str(record["period_end"]))
-    past = [
+    # Fail closed: only rows the provider explicitly marks as actuals count,
+    # and only when their period has already ended. An unmarked prior-year
+    # analyst-estimate row is consensus, not a reported figure, and a marked
+    # row dated after analysis_as_of would be look-ahead.
+    marked_actual = [
         record
         for record in periods
-        if _parse_date(record["period_end"], "period_end") <= analysis_as_of
+        if record.get("is_actual")
+        and _parse_date(record["period_end"], "period_end") <= analysis_as_of
     ]
-    if past:
-        return max(past, key=lambda record: str(record["period_end"]))
+    if marked_actual:
+        return max(marked_actual, key=lambda record: str(record["period_end"]))
     return None
 
 
@@ -558,3 +560,93 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def apply_verified_actual_eps(
+    row: Mapping[str, Any],
+    *,
+    actual_eps: float | None,
+    period_end: str | None,
+    analysis_as_of: datetime,
+    source_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Re-derive the growth-basis fields from a VERIFIED reported annual EPS.
+
+    ``actual_eps``/``period_end`` must come from a filing whose accepted date is
+    at or before ``analysis_as_of`` (the caller checks that). When the actual is
+    missing, non-positive, or dated after ``analysis_as_of``, every
+    actual-derived field is reset to None and ``growth_pattern`` to
+    ``"unknown"`` so nothing downstream can mistake consensus for a reported
+    figure.
+    """
+    out = dict(row)
+    reset = {
+        "latest_actual_eps": None,
+        "latest_actual_period_end": None,
+        "latest_actual_source_ids": [],
+        "latest_actual_verified": False,
+        "fy1_eps_below_latest_actual": None,
+        "current_year_growth_pct": None,
+        "eps_growth_actual_to_fy3_pct": None,
+        "growth_pattern": "unknown",
+    }
+    if actual_eps is None or actual_eps <= 0 or not period_end:
+        out.update(reset)
+        return out
+    end = _parse_date(period_end, "actual.period_end")
+    if end > analysis_as_of:
+        out.update(reset)
+        return out
+
+    fy1_eps = _number(out.get("fy1_eps"))
+    periods = [dict(p) for p in (out.get("estimate_periods") or []) if isinstance(p, Mapping)]
+    growth_end_period = _text(out.get("growth_horizon_end_period"))
+    growth_end = next((p for p in periods if _text(p.get("period")) == growth_end_period), None)
+    growth_end_eps = _number(growth_end.get("eps_avg")) if growth_end else None
+    growth_end_end = _text(growth_end.get("period_end")) if growth_end else None
+
+    fy1_below = fy1_eps < actual_eps if fy1_eps is not None else None
+    current_year_growth = (fy1_eps / actual_eps - 1.0) * 100.0 if fy1_eps is not None else None
+    actual_to_fy3 = None
+    if growth_end_eps is not None and growth_end_end:
+        years = (_parse_date(growth_end_end, "growth_end.period_end") - end).days / 365.25
+        actual_to_fy3 = _cagr(actual_eps, growth_end_eps, years)
+
+    early = late = None
+    if len(periods) >= 2:
+        early = _cagr(
+            _number(periods[0].get("eps_avg")),
+            _number(periods[1].get("eps_avg")),
+            (
+                _parse_date(periods[1]["period_end"], "p1")
+                - _parse_date(periods[0]["period_end"], "p0")
+            ).days
+            / 365.25,
+        )
+    if len(periods) >= 3:
+        late = _cagr(
+            _number(periods[1].get("eps_avg")),
+            _number(periods[2].get("eps_avg")),
+            (
+                _parse_date(periods[2]["period_end"], "p2")
+                - _parse_date(periods[1]["period_end"], "p1")
+            ).days
+            / 365.25,
+        )
+    out.update(
+        {
+            "latest_actual_eps": round(actual_eps, 6),
+            "latest_actual_period_end": period_end,
+            "latest_actual_source_ids": list(source_ids),
+            "latest_actual_verified": True,
+            "fy1_eps_below_latest_actual": fy1_below,
+            "current_year_growth_pct": round(current_year_growth, 6)
+            if current_year_growth is not None
+            else None,
+            "eps_growth_actual_to_fy3_pct": round(actual_to_fy3, 6)
+            if actual_to_fy3 is not None
+            else None,
+            "growth_pattern": _growth_pattern(actual_eps, fy1_eps, growth_end_eps, early, late),
+        }
+    )
+    return out

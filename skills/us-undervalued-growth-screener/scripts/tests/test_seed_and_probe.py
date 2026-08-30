@@ -156,8 +156,8 @@ class DynamicSeedLimitTests(unittest.TestCase):
             candidate_packet_reserve_calls=30,
             retry_reserve_calls=25,
         )
-        # reserved = 35+40+30+25 = 130; remaining = 350; 350-130=220
-        # min(180, 200, 220) = 180
+        # reserved = 35*2+40+30+25 = 165 (probe = key metrics + annual income
+        # statement); remaining = 350; 350-165 = 185; min(180, 200, 185) = 180
         self.assertEqual(effective, 180)
 
     def test_effective_limit_shrinks_with_calls_already_made(self) -> None:
@@ -165,13 +165,13 @@ class DynamicSeedLimitTests(unittest.TestCase):
             pre_enrichment_limit=180,
             seed_limit_cap=200,
             max_api_calls=350,
-            api_calls_made=200,
+            api_calls_made=165,
             quality_probe_limit=35,
             exact_liquidity_limit=40,
             candidate_packet_reserve_calls=30,
             retry_reserve_calls=25,
         )
-        # remaining = 150; reserved = 130; 150-130 = 20
+        # remaining = 185; reserved = 165; 185-165 = 20
         self.assertEqual(effective, 20)
 
     def test_effective_limit_below_20_raises(self) -> None:
@@ -180,7 +180,7 @@ class DynamicSeedLimitTests(unittest.TestCase):
                 pre_enrichment_limit=180,
                 seed_limit_cap=200,
                 max_api_calls=350,
-                api_calls_made=201,
+                api_calls_made=166,
                 quality_probe_limit=35,
                 exact_liquidity_limit=40,
                 candidate_packet_reserve_calls=30,

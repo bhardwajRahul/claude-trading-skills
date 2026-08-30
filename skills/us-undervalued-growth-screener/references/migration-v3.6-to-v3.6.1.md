@@ -36,7 +36,7 @@ effective = min(pre_enrichment_limit, seed_limit_cap,
                 max_api_calls - api_calls_made - reserved)
 ```
 
-An effective limit below 20 fails the run with `estimate seed budget insufficient` instead of silently producing a thin pool.
+An effective limit below 20 fails the run with `estimate seed budget insufficient` instead of silently producing a thin pool. The probe reserve is counted twice per target (key metrics + annual income statement).
 
 ### Quality probe before pool selection
 
@@ -46,9 +46,13 @@ Lane scores now include an FCF-yield term (weight 1.0 core_garp / quality_near_m
 
 ### Honest scope fields
 
+Route selection and completeness are separate thresholds: the bulk route is used from `bulk_estimate_minimum_coverage_pct` (20%), but `economic_screen_scope_complete` / `economic_candidate_universe_exhausted` are true only when bulk coverage reaches `economic_scope_complete_minimum_coverage_pct` (default 99%). A 25%-covered bulk run is a bounded economic screen, exactly like the per-symbol fallback.
+
 `run-summary.json` and `NEXT_ACTION.json` add `listing_enumeration_complete`, `economic_screen_scope_complete`, `listing_universe_count`, `estimate_seed_count`, `estimate_seed_coverage_pct`, `valid_estimate_count`, `valid_estimate_coverage_pct`. `scope_complete` is retained for readers of v3.6.0 output and now carries `scope_complete_deprecated_note`. The discovery audit adds `listing_provider_exhausted`, `estimate_seed_exhausted`, `economic_candidate_universe_exhausted`, and `provider_exhausted_scope` (`estimate_seed` on the fallback path). The contract-validated `screening_audit.scope` block is unchanged.
 
 ### Growth basis
+
+**Actuals are verified or absent.** `latest_actual_eps` is populated only from (a) a provider row explicitly marked as actual whose period has ended, or (b) the annual income statement fetched during the quality probe, accepted (filed) at or before `analysis_as_of` (`latest_actual_verified: true`, `latest_actual_source_ids`). An unmarked prior-year estimate row is consensus and never becomes an actual; without a verified actual the actual-derived fields are null and `growth_pattern` is `unknown` (fail closed). Rows outside the probe therefore cannot be classified as `trough_recovery`.
 
 `normalize_estimates.py` adds `latest_actual_eps`, `latest_actual_period_end`, `fy1_eps_below_latest_actual`, `current_year_growth_pct`, `eps_growth_fy1_to_fy3_pct` (alias of `eps_growth_pct`), `eps_growth_actual_to_fy3_pct`, `growth_pattern` (`steady | accelerating | trough_recovery | declining | unknown`), and `growth_basis_source_ids`. A `trough_recovery` row is removed from `core_garp` and admitted to `quality_near_miss` with the `earnings_recovery` flag.
 

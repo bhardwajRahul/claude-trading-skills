@@ -62,7 +62,7 @@ def _normalize(symbol: str, estimates: list[dict], listing: dict | None = None) 
 class GrowthBasisTests(unittest.TestCase):
     def test_yelp_like_series_is_trough_recovery(self) -> None:
         estimates = [
-            _row("YELP", "2025-12-31", "2025", 2.24),
+            _row("YELP", "2025-12-31", "2025", 2.24, isActual=True),
             _row("YELP", "2026-12-31", "2026", 1.81),
             _row("YELP", "2027-12-31", "2027", 2.53),
             _row("YELP", "2028-12-31", "2028", 2.61),
@@ -85,7 +85,7 @@ class GrowthBasisTests(unittest.TestCase):
 
     def test_steady_growth_series(self) -> None:
         estimates = [
-            _row("STDY", "2025-12-31", "2025", 2.00),
+            _row("STDY", "2025-12-31", "2025", 2.00, isActual=True),
             _row("STDY", "2026-12-31", "2026", 2.20),
             _row("STDY", "2027-12-31", "2027", 2.42),
             _row("STDY", "2028-12-31", "2028", 2.66),
@@ -98,7 +98,7 @@ class GrowthBasisTests(unittest.TestCase):
 
     def test_declining_series(self) -> None:
         estimates = [
-            _row("DECL", "2025-12-31", "2025", 3.00),
+            _row("DECL", "2025-12-31", "2025", 3.00, isActual=True),
             _row("DECL", "2026-12-31", "2026", 2.80),
             _row("DECL", "2027-12-31", "2027", 2.60),
             _row("DECL", "2028-12-31", "2028", 2.40),
@@ -127,7 +127,7 @@ class GrowthBasisTests(unittest.TestCase):
         # for actual-based derivatives instead of dividing by zero / taking a
         # fractional power of a negative number.
         estimates = [
-            _row("NEG", "2025-12-31", "2025", -1.50),
+            _row("NEG", "2025-12-31", "2025", -1.50, isActual=True),
             _row("NEG", "2026-12-31", "2026", 1.00),
             _row("NEG", "2027-12-31", "2027", 1.30),
             _row("NEG", "2028-12-31", "2028", 1.69),
@@ -142,7 +142,7 @@ class GrowthBasisTests(unittest.TestCase):
 
     def test_accelerating_growth_labeled_accelerating(self) -> None:
         estimates = [
-            _row("ACC", "2025-12-31", "2025", 1.00),
+            _row("ACC", "2025-12-31", "2025", 1.00, isActual=True),
             _row("ACC", "2026-12-31", "2026", 1.20),
             _row("ACC", "2027-12-31", "2027", 1.60),
             _row("ACC", "2028-12-31", "2028", 2.30),
