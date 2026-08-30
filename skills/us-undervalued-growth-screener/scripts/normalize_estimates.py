@@ -323,16 +323,36 @@ def normalize_symbol(
     latest_actual_period_end = (
         latest_actual_period.get("period_end") if latest_actual_period else None
     )
+    # Same-basis reference: the provider's most recent prior-year row. It is
+    # CONSENSUS on the provider's (usually adjusted) basis -- never reported as
+    # an actual -- but it is the only figure on the same basis as FY1/FY3, so
+    # it is the correct comparator for "is the current year a decline".
+    fy0_candidates = [
+        record
+        for record in periods
+        if _parse_date(record["period_end"], "period_end") <= analysis_as_of
+    ]
+    fy0 = (
+        max(fy0_candidates, key=lambda record: str(record["period_end"]))
+        if fy0_candidates
+        else None
+    )
+    fy0_consensus_eps = _number(fy0.get("eps_avg")) if fy0 else None
+    fy0_period_end = fy0.get("period_end") if fy0 else None
     fy1_raw_eps = _number(fy1.get("eps_avg")) if fy1 else None
     growth_end_raw_eps = _number(growth_end.get("eps_avg")) if growth_end else None
     has_positive_actual = latest_actual_eps is not None and latest_actual_eps > 0
+    has_positive_fy0 = fy0_consensus_eps is not None and fy0_consensus_eps > 0
 
     fy1_eps_below_latest_actual = (
         fy1_raw_eps < latest_actual_eps if has_positive_actual and fy1_raw_eps is not None else None
     )
+    fy1_eps_below_fy0_consensus = (
+        fy1_raw_eps < fy0_consensus_eps if has_positive_fy0 and fy1_raw_eps is not None else None
+    )
     current_year_growth_pct = (
-        (fy1_raw_eps / latest_actual_eps - 1.0) * 100.0
-        if has_positive_actual and fy1_raw_eps is not None
+        (fy1_raw_eps / fy0_consensus_eps - 1.0) * 100.0
+        if has_positive_fy0 and fy1_raw_eps is not None
         else None
     )
     actual_to_growth_end_years = 0.0
@@ -367,12 +387,13 @@ def normalize_symbol(
         )
 
     growth_pattern = _growth_pattern(
-        latest_actual_eps,
+        fy0_consensus_eps,
         fy1_raw_eps,
         growth_end_raw_eps,
         early_growth_pct,
         late_growth_pct,
     )
+    growth_pattern_basis = "consensus_same_basis" if has_positive_fy0 else "unknown"
 
     status = "valid" if not reasons else "unavailable"
     canonical_forward_eps = forward_eps if status == "valid" else None
@@ -434,9 +455,16 @@ def normalize_symbol(
             else None,
             "latest_actual_period_end": latest_actual_period_end,
             "fy1_eps_below_latest_actual": fy1_eps_below_latest_actual,
+            "fy0_consensus_eps": round(fy0_consensus_eps, 6)
+            if fy0_consensus_eps is not None
+            else None,
+            "fy0_period_end": fy0_period_end,
+            "fy1_eps_below_fy0_consensus": fy1_eps_below_fy0_consensus,
             "current_year_growth_pct": round(current_year_growth_pct, 6)
             if current_year_growth_pct is not None
             else None,
+            "growth_pattern_basis": growth_pattern_basis,
+            "estimate_basis_likely_adjusted": None,
             "eps_growth_actual_to_fy3_pct": round(eps_growth_actual_to_fy3, 6)
             if eps_growth_actual_to_fy3 is not None
             else None,
@@ -580,15 +608,19 @@ def apply_verified_actual_eps(
     figure.
     """
     out = dict(row)
+    # growth_pattern / current_year_growth_pct stay on the consensus same-basis
+    # comparison made at normalization; a GAAP actual must never be compared
+    # against an (usually adjusted) consensus to relabel them.
     reset = {
         "latest_actual_eps": None,
         "latest_actual_period_end": None,
         "latest_actual_source_ids": [],
         "latest_actual_verified": False,
+        "latest_actual_basis": None,
         "fy1_eps_below_latest_actual": None,
-        "current_year_growth_pct": None,
+        "current_year_growth_pct_vs_gaap_actual": None,
         "eps_growth_actual_to_fy3_pct": None,
-        "growth_pattern": "unknown",
+        "estimate_basis_likely_adjusted": None,
     }
     if actual_eps is None or actual_eps <= 0 or not period_end:
         out.update(reset)
@@ -607,46 +639,33 @@ def apply_verified_actual_eps(
 
     fy1_below = fy1_eps < actual_eps if fy1_eps is not None else None
     current_year_growth = (fy1_eps / actual_eps - 1.0) * 100.0 if fy1_eps is not None else None
+    fy0_consensus = _number(out.get("fy0_consensus_eps"))
+    # Consensus is usually adjusted (ex-SBC, ex-amortization); when the
+    # provider's own prior-year row differs from the GAAP actual by more than
+    # 15%, the bases differ and GAAP-vs-consensus comparisons are unreliable.
+    basis_flag = (
+        abs(fy0_consensus - actual_eps) / actual_eps > 0.15 if fy0_consensus is not None else None
+    )
     actual_to_fy3 = None
     if growth_end_eps is not None and growth_end_end:
         years = (_parse_date(growth_end_end, "growth_end.period_end") - end).days / 365.25
         actual_to_fy3 = _cagr(actual_eps, growth_end_eps, years)
 
-    early = late = None
-    if len(periods) >= 2:
-        early = _cagr(
-            _number(periods[0].get("eps_avg")),
-            _number(periods[1].get("eps_avg")),
-            (
-                _parse_date(periods[1]["period_end"], "p1")
-                - _parse_date(periods[0]["period_end"], "p0")
-            ).days
-            / 365.25,
-        )
-    if len(periods) >= 3:
-        late = _cagr(
-            _number(periods[1].get("eps_avg")),
-            _number(periods[2].get("eps_avg")),
-            (
-                _parse_date(periods[2]["period_end"], "p2")
-                - _parse_date(periods[1]["period_end"], "p1")
-            ).days
-            / 365.25,
-        )
     out.update(
         {
             "latest_actual_eps": round(actual_eps, 6),
             "latest_actual_period_end": period_end,
             "latest_actual_source_ids": list(source_ids),
             "latest_actual_verified": True,
+            "latest_actual_basis": "gaap_diluted",
             "fy1_eps_below_latest_actual": fy1_below,
-            "current_year_growth_pct": round(current_year_growth, 6)
+            "current_year_growth_pct_vs_gaap_actual": round(current_year_growth, 6)
             if current_year_growth is not None
             else None,
             "eps_growth_actual_to_fy3_pct": round(actual_to_fy3, 6)
             if actual_to_fy3 is not None
             else None,
-            "growth_pattern": _growth_pattern(actual_eps, fy1_eps, growth_end_eps, early, late),
+            "estimate_basis_likely_adjusted": basis_flag,
         }
     )
     return out

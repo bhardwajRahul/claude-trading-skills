@@ -104,13 +104,23 @@ class VerifiedActualTests(unittest.TestCase):
         out = _normalize(self.SERIES)
         self.assertIsNone(out["latest_actual_eps"])
         self.assertIsNone(out["fy1_eps_below_latest_actual"])
+        # ...but it IS the same-basis consensus reference for the growth pattern
+        self.assertEqual(out["fy0_consensus_eps"], 2.0)
+        self.assertTrue(out["fy1_eps_below_fy0_consensus"])
+        self.assertEqual(out["growth_pattern"], "trough_recovery")
+        self.assertEqual(out["growth_pattern_basis"], "consensus_same_basis")
+
+    def test_no_prior_year_row_means_unknown_pattern(self) -> None:
+        out = _normalize(self.SERIES[1:])
+        self.assertIsNone(out["fy0_consensus_eps"])
         self.assertEqual(out["growth_pattern"], "unknown")
+        self.assertEqual(out["growth_pattern_basis"], "unknown")
 
     def test_marked_actual_after_analysis_as_of_is_ignored(self) -> None:
         rows = list(self.SERIES) + [_row("2027-12-31", "2027", 9.0, isActual=True)]
         out = _normalize(rows)
         self.assertIsNone(out["latest_actual_eps"])
-        self.assertEqual(out["growth_pattern"], "unknown")
+        self.assertEqual(out["fy0_consensus_eps"], 2.0)  # look-ahead row never becomes FY0
 
     def test_marked_actual_before_analysis_as_of_is_used(self) -> None:
         rows = [_row("2025-12-31", "2025", 2.24, isActual=True)] + self.SERIES[1:]
@@ -129,9 +139,14 @@ class VerifiedActualTests(unittest.TestCase):
         )
         self.assertTrue(out["latest_actual_verified"])
         self.assertEqual(out["latest_actual_eps"], 2.24)
+        self.assertEqual(out["latest_actual_basis"], "gaap_diluted")
         self.assertTrue(out["fy1_eps_below_latest_actual"])
-        self.assertAlmostEqual(out["current_year_growth_pct"], (1.8 / 2.24 - 1) * 100, places=4)
-        self.assertEqual(out["growth_pattern"], "trough_recovery")
+        self.assertAlmostEqual(
+            out["current_year_growth_pct_vs_gaap_actual"], (1.8 / 2.24 - 1) * 100, places=4
+        )
+        # consensus FY0 2.0 vs GAAP 2.24 -> 10.7% gap: same basis, no flag
+        self.assertFalse(out["estimate_basis_likely_adjusted"])
+        self.assertEqual(out["growth_pattern"], "trough_recovery")  # unchanged, consensus basis
         self.assertEqual(
             out["latest_actual_source_ids"], ["fmp-income-statement-annual-2026-08-22"]
         )
@@ -142,12 +157,31 @@ class VerifiedActualTests(unittest.TestCase):
             base, actual_eps=2.24, period_end="2027-12-31", analysis_as_of=AS_OF, source_ids=["x"]
         )
         self.assertFalse(future["latest_actual_verified"])
-        self.assertEqual(future["growth_pattern"], "unknown")
+        self.assertIsNone(future["latest_actual_eps"])
         missing = NORMALIZER.apply_verified_actual_eps(
             base, actual_eps=None, period_end=None, analysis_as_of=AS_OF, source_ids=[]
         )
         self.assertIsNone(missing["latest_actual_eps"])
-        self.assertEqual(missing["growth_pattern"], "unknown")
+        # consensus-basis pattern is untouched by a missing/invalid actual
+        self.assertEqual(missing["growth_pattern"], base["growth_pattern"])
+
+    def test_gaap_actual_far_below_consensus_flags_basis_mismatch(self) -> None:
+        # DOCS-like: consensus FY0 1.52 (non-GAAP), GAAP actual 0.98, FY1 1.35
+        rows = [
+            _row("2026-03-31", "2026", 1.52),
+            _row("2027-03-31", "2027", 1.35),
+            _row("2028-03-31", "2028", 1.55),
+            _row("2029-03-31", "2029", 1.75),
+        ]
+        base = _normalize(rows)
+        self.assertTrue(base["fy1_eps_below_fy0_consensus"])
+        self.assertEqual(base["growth_pattern"], "trough_recovery")
+        out = NORMALIZER.apply_verified_actual_eps(
+            base, actual_eps=0.98, period_end="2026-03-31", analysis_as_of=AS_OF, source_ids=["is"]
+        )
+        self.assertTrue(out["estimate_basis_likely_adjusted"])
+        self.assertFalse(out["fy1_eps_below_latest_actual"])  # 1.35 > 0.98 on mixed bases
+        self.assertEqual(out["growth_pattern"], "trough_recovery")  # same-basis verdict kept
 
 
 class VerifiedAnnualActualParsingTests(unittest.TestCase):
