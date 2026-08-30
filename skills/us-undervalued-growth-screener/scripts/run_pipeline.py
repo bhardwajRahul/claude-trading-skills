@@ -337,6 +337,48 @@ def normalize_listing(row: Mapping[str, Any], exchange: str) -> dict[str, Any] |
     }
 
 
+def _coverage_count(value: Any) -> int:
+    """Length of a list-valued audit field, or the int it already is."""
+    if isinstance(value, list):
+        return len(value)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def classify_ranking_scope(
+    *,
+    economic_attempt_count: int,
+    listing_universe_count: int,
+    economic_scope_complete: bool,
+    unresolved_queue_count: int,
+) -> str:
+    """Classify how far a run's conclusion may be generalized.
+
+    Listing enumeration completeness never makes a market-wide ranking: only
+    attempting economic (estimate) acquisition for EVERY listed symbol does.
+
+    - ``final_marketwide``: estimate acquisition was attempted for every
+      listing-universe symbol (exact counts) and the run left no unresolved
+      queue — only then may the output be read as a market ranking.
+    - ``final_scoped``: a bounded, explicitly audited subset was fully
+      processed; conclusions bind only to that subset, never to the market.
+    - ``diagnostic``: even the intended scope was left partially processed
+      (unresolved enrichment queue), so the output is a pipeline diagnostic,
+      not a ranking of anything.
+    """
+    if unresolved_queue_count > 0:
+        return "diagnostic"
+    if (
+        economic_scope_complete
+        and listing_universe_count > 0
+        and economic_attempt_count >= listing_universe_count
+    ):
+        return "final_marketwide"
+    return "final_scoped"
+
+
 def collect_listing_universe(
     client: FMPClient,
     *,
@@ -1853,6 +1895,30 @@ def execute_pipeline(
         universe_symbol_count=int(bulk_estimate_audit.get("universe_symbol_count") or 0),
     )
     old_scope_complete = bool(audit.get("scope", {}).get("scope_complete"))
+    quality_probe_count = _coverage_count(quality_probe_audit.get("attempted"))
+    deep_dive_count = len(selected)
+    ranking_scope = classify_ranking_scope(
+        economic_attempt_count=estimate_seed_count,
+        listing_universe_count=listing_universe_count,
+        economic_scope_complete=economic_screen_scope_complete,
+        unresolved_queue_count=len(queue),
+    )
+    coverage_block = {
+        "ranking_scope": ranking_scope,
+        "economic_attempt_count": estimate_seed_count,
+        "economic_attempt_coverage_pct": round(estimate_seed_coverage_pct, 6),
+        "economically_evaluable_count": valid_estimate_count,
+        "economically_evaluable_coverage_pct": round(valid_estimate_coverage_pct, 6),
+        "quality_probe_count": quality_probe_count,
+        "quality_probe_coverage_pct": round(
+            quality_probe_count / listing_universe_count * 100.0 if listing_universe_count else 0.0,
+            6,
+        ),
+        "deep_dive_count": deep_dive_count,
+        "deep_dive_coverage_pct": round(
+            deep_dive_count / listing_universe_count * 100.0 if listing_universe_count else 0.0, 6
+        ),
+    }
 
     pool_status = str(audit.get("candidate_pool_status") or "")
     selection_outcome = str(audit.get("selection_outcome") or "")
@@ -1884,6 +1950,7 @@ def execute_pipeline(
         "estimate_seed_coverage_pct": round(estimate_seed_coverage_pct, 6),
         "valid_estimate_count": valid_estimate_count,
         "valid_estimate_coverage_pct": round(valid_estimate_coverage_pct, 6),
+        **coverage_block,
         "required_after_underwriting": [
             "manage_run_state.py assemble",
             "evaluate_candidates.py --strict --require-final",
@@ -1913,6 +1980,7 @@ def execute_pipeline(
         "estimate_seed_coverage_pct": round(estimate_seed_coverage_pct, 6),
         "valid_estimate_count": valid_estimate_count,
         "valid_estimate_coverage_pct": round(valid_estimate_coverage_pct, 6),
+        **coverage_block,
         "listing_enumeration_verified": bool(enumeration_audit["enumeration_verified"]),
         "listing_query_count": int(enumeration_audit["query_count"]),
         "universe_count": len(enriched_universe),

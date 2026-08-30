@@ -77,6 +77,12 @@ Gold, silver, precious/base metals, copper, uranium, coal, metals & mining, and 
 - FMP `acceptedDate` / naive publish stamps are US/Eastern (the SEC acceptance clock), not UTC: a 17:23 ET acceptance read as UTC leaked the filing 4-5 hours early. Both `_verified_annual_actual` and the consensus publish check convert from `America/New_York`; date-only publish stamps count only after the whole publication day (ET) has passed.
 - The scope-less pool-floor waiver was removed (fail closed; see the round-4 section above).
 
+### Honest ranking scope (round-6 review)
+
+- Listing 2,371 names and economically comparing 2,371 names are different claims: a run that attempted estimates for 180 seeds (98 evaluable, 4.1% of the universe) is a **scoped pilot**, not a market ranking, and the remaining ~96% are *unexamined*, not rejected. Every run now carries a tri-state `ranking_scope` — `final_marketwide` (estimate acquisition attempted for every listed symbol, exact counts), `final_scoped` (a bounded, fully processed subset; conclusions bind only to it), or `diagnostic` (unresolved queue) — plus per-stage coverage counts and percentages (`economic_attempt_*`, `economically_evaluable_*`, `quality_probe_*`, `deep_dive_*`) in the run summary and report JSON.
+- The report title, scope banner, and the no-qualifying-candidates conclusion state the subset explicitly ("Scoped Pilot (180 of 2,371 listed names economically attempted)"; "the remaining names were never economically compared").
+- `final_marketwide` is currently unreachable on the direct-FMP Starter path by design: reaching it requires the v3.7 sharded full-universe estimate collection (persistent snapshot store, ~8 deterministic shards within the per-run call budget) tracked as a follow-up issue, together with a discovery-recall gold-set harness (Recall@K against known past candidates).
+
 ### Endpoint capability cache
 
 The generated client remembers a 402/403 bulk response in the SQLite cache (`capability:<url>`, 30-day TTL) and pre-disables that endpoint on later runs without spending a call. `respect_capability_cache=False` re-probes unconditionally. Diagnostics add `capability_cache_hits` and `remaining_calls`.

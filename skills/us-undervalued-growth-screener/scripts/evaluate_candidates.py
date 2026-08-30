@@ -2867,6 +2867,10 @@ def evaluate_snapshot(
         values.sort(key=lambda row: str(row.get("symbol") or ""))
     broad_counts = {key: len(value) for key, value in broad_groups.items()}
 
+    coverage_info = _derive_ranking_scope(
+        _mapping(normalized_payload.get("screening_audit")), deep_dive_count=len(candidates)
+    )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "runtime": runtime_metadata(),
@@ -2875,6 +2879,8 @@ def evaluate_snapshot(
         "strict_mode": strict,
         "run_metadata": deepcopy(run_metadata),
         "ranking_status": ranking_status,
+        "ranking_scope": coverage_info.get("ranking_scope"),
+        "coverage": coverage_info,
         "price_basis": deepcopy(price_basis),
         "config": config,
         "global_sources": deepcopy(_list(normalized_payload.get("global_sources"))),
@@ -2916,6 +2922,53 @@ def _md_escape(value: Any) -> str:
 
 def _scenario_value(result: Mapping[str, Any], scenario: str, horizon: str, key: str) -> Any:
     return _mapping(_mapping(_mapping(result.get("valuation")).get(scenario)).get(horizon)).get(key)
+
+
+def _derive_ranking_scope(audit: Mapping[str, Any], *, deep_dive_count: int) -> dict[str, Any]:
+    """Classify how far the run's conclusion may be generalized, with coverage.
+
+    ``final_marketwide`` requires estimate acquisition attempted for EVERY
+    listing-universe symbol (exact counts); a bounded but fully processed
+    subset is ``final_scoped`` (conclusions bind only to that subset); an
+    unresolved enrichment queue makes the output ``diagnostic``. Listing
+    enumeration completeness alone never yields a market-wide ranking.
+    """
+    universe_total = _integer(_mapping(audit.get("universe")).get("row_count")) or 0
+    generation = _mapping(_mapping(audit.get("candidate_pool")).get("generation_audit"))
+    bulk = _mapping(generation.get("bulk_estimate_audit"))
+    seed_info = _mapping(generation.get("seed_audit"))
+    covered = _integer(bulk.get("covered_symbol_count")) or 0
+    mode = _text(generation.get("estimate_acquisition_mode"))
+    if mode == "analyst_estimates_bulk" and covered:
+        attempted = covered
+    else:
+        attempted = _integer(seed_info.get("seed_limit_effective")) or 0
+    probe_raw = _mapping(generation.get("quality_probe")).get("attempted")
+    if isinstance(probe_raw, list):
+        probe_count = len(probe_raw)
+    else:
+        probe_count = _integer(probe_raw) or 0
+    queue_count = _integer(_mapping(audit.get("enrichment")).get("unresolved_count")) or 0
+    if queue_count > 0:
+        scope = "diagnostic"
+    elif mode == "analyst_estimates_bulk" and universe_total > 0 and covered >= universe_total:
+        scope = "final_marketwide"
+    else:
+        scope = "final_scoped"
+
+    def _pct(count: int) -> float:
+        return round(count / universe_total * 100.0, 6) if universe_total else 0.0
+
+    return {
+        "ranking_scope": scope,
+        "listing_universe_count": universe_total,
+        "economic_attempt_count": attempted,
+        "economic_attempt_coverage_pct": _pct(attempted),
+        "quality_probe_count": probe_count,
+        "quality_probe_coverage_pct": _pct(probe_count),
+        "deep_dive_count": deep_dive_count,
+        "deep_dive_coverage_pct": _pct(deep_dive_count),
+    }
 
 
 def _render_list(values: Any, missing: str) -> str:
@@ -3148,10 +3201,43 @@ def render_markdown(report: Mapping[str, Any], *, language: str = "en") -> str:
         "US Undervalued Growth Screening Report",
         "米国株・割安成長株スクリーニングレポート",
     )
+    coverage = _mapping(report.get("coverage"))
+    ranking_scope = _text(report.get("ranking_scope"))
+    if ranking_scope == "final_scoped":
+        evaluated = coverage.get("economic_attempt_count", "?")
+        listed = coverage.get("listing_universe_count", "?")
+        title += _label(
+            language,
+            f" — Scoped Pilot ({evaluated} of {listed} listed names economically attempted)",
+            f" — 限定パイロット（上場{listed}銘柄中{evaluated}銘柄のみ経済評価を試行）",
+        )
+    elif ranking_scope == "diagnostic":
+        title += _label(language, " — DIAGNOSTIC (incomplete scope)", " — 診断用（範囲未完了）")
     if report.get("ranking_status") != "final":
         title += _label(language, " — PROVISIONAL", " — 暫定")
     lines.append(f"# {title}")
     lines.append("")
+    if ranking_scope and ranking_scope != "final_marketwide":
+        attempt_pct = coverage.get("economic_attempt_coverage_pct")
+        attempt_pct_text = f"{float(attempt_pct):.2f}%" if attempt_pct is not None else missing
+        lines.append(
+            f"- **{_label(language, 'Ranking scope', 'ランキング範囲')}:** {ranking_scope} — "
+            + _label(
+                language,
+                (
+                    f"conclusions bind ONLY to the {coverage.get('economic_attempt_count', '?')} names whose estimate "
+                    f"acquisition was attempted ({attempt_pct_text} of "
+                    f"{coverage.get('listing_universe_count', '?')} listed; quality probe {coverage.get('quality_probe_count', '?')}, "
+                    f"deep dive {coverage.get('deep_dive_count', '?')}). This is NOT a market-wide ranking."
+                ),
+                (
+                    f"結論は予想取得を試行した{coverage.get('economic_attempt_count', '?')}銘柄"
+                    f"（上場{coverage.get('listing_universe_count', '?')}銘柄の{attempt_pct_text}、"
+                    f"品質プローブ{coverage.get('quality_probe_count', '?')}銘柄、詳細分析{coverage.get('deep_dive_count', '?')}銘柄）"
+                    "に限定され、市場全体ランキングではありません。"
+                ),
+            )
+        )
     lines.append(
         f"- **{_label(language, 'Analysis as of', '分析実施日時')}:** {report.get('analysis_as_of')}"
     )
@@ -3302,11 +3388,22 @@ def render_markdown(report: Mapping[str, Any], *, language: str = "en") -> str:
             report.get("ranking_status") == "final"
             and pool_status == "no_qualifying_candidates_in_bounded_pool"
         ):
+            cov = _mapping(report.get("coverage"))
             lines.append(
                 _label(
                     language,
-                    "No qualifying candidates in the audited bounded pool; this is not a market-wide conclusion.",
-                    "監査済みの限定候補プールでは該当なし（市場全体の該当なしを意味しません）。",
+                    (
+                        f"No qualifying candidates among the {cov.get('deep_dive_count', '?')} deep-dived names "
+                        f"selected from the {cov.get('economic_attempt_count', '?')} economically attempted "
+                        f"(of {cov.get('listing_universe_count', '?')} listed); the remaining names were never "
+                        "economically compared — this is not a market-wide conclusion."
+                    ),
+                    (
+                        f"経済評価を試行した{cov.get('economic_attempt_count', '?')}銘柄から選定した"
+                        f"{cov.get('deep_dive_count', '?')}銘柄の詳細分析では該当なし"
+                        f"（上場{cov.get('listing_universe_count', '?')}銘柄の残りは未審査であり、"
+                        "市場全体の該当なしを意味しません）。"
+                    ),
                 )
             )
         else:
