@@ -37,7 +37,12 @@ python3 scripts/run_pipeline.py \
   client's per-call diagnostics (calls / cache hits / failure count) and
   records failures as `fetch_failed` — the symbol stays uncollected, the
   shard stays `partial` (`shard_partial_fetch_failures`, exit 3), and the
-  marketwide invariant cannot be satisfied by outages.
+  marketwide invariant cannot be satisfied by outages. HTTP-200 error
+  bodies (`{"Error Message": ...}` plan-limit style) are validated in the
+  client itself: recorded as `provider_error_payload`, never cached; a
+  malformed object that predates validation in an existing cache is
+  flagged `unexpected_payload_shape` on read and likewise becomes a fetch
+  failure.
 - Budget exhaustion mid-shard exits with code **3**, records the shard as
   `partial` in the manifest, and is resumable with `--resume`. A shard file
   that already exists without `--resume` is refused.
@@ -45,10 +50,13 @@ python3 scripts/run_pipeline.py \
   row count, symbol uniqueness, canonical SHA-256) before any API access or
   shard append; a swapped `universe.jsonl` is refused.
 - Every collected row carries `snapshot_retrieved_at` — the ACTUAL fetch
-  time (cache-served rows are stamped from the cache entry's creation time,
-  best-effort) — plus `snapshot_served_from_cache`. Shards aggregate
-  `oldest_retrieved_at` / `newest_retrieved_at`, and a run that collects
-  nothing does NOT refresh the shard's `as_of` freshness stamp.
+  time. Cache-served rows (any cache hit, including a failed stable HTTP
+  attempt falling back to the v3 cache) are stamped from the cache entry's
+  creation time; when that provenance cannot be resolved the stamp stays
+  **null** (counted as `retrieval_time_unknown`, never back-filled with
+  "now"). Shards aggregate `oldest_retrieved_at` / `newest_retrieved_at`,
+  and a run that collects nothing does NOT refresh the shard's `as_of`
+  freshness stamp.
 - Shard summaries (`shard-<i>-summary.json`) and the manifest carry attempted
   / expected / fetch-failed counts, per-bucket classification, `as_of`,
   retrieval bounds, and calls used.

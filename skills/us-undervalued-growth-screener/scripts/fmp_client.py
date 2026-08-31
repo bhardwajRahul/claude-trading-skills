@@ -37,6 +37,17 @@ except ImportError:
     raise
 
 
+_PROVIDER_ERROR_KEYS = frozenset({"error message", "errormessage", "error"})
+
+
+def _is_provider_error_payload(payload: Any) -> bool:
+    """True for HTTP-200 error objects (e.g. {"Error Message": "plan limit"})."""
+    if not isinstance(payload, dict):
+        return False
+    keys = {str(key).strip().lower() for key in payload}
+    return bool(keys & _PROVIDER_ERROR_KEYS)
+
+
 class ApiCallBudgetExceeded(RuntimeError):
     """Raised when the configured provider-call ceiling is reached."""
 
@@ -272,6 +283,14 @@ class FMPClient:
                 if not quiet:
                     print(f"WARN: FMP returned invalid JSON: {url}", file=sys.stderr)
                 return None
+            if _is_provider_error_payload(payload):
+                # FMP reports plan limits and endpoint errors as HTTP 200
+                # bodies like {"Error Message": "..."}; treating those as
+                # data would cache the outage as an "empty" success.
+                self._record_failure(url, "provider_error_payload", response.status_code)
+                if not quiet:
+                    print(f"WARN: FMP returned an error payload: {url}", file=sys.stderr)
+                return None
             if not allow_empty and payload in (None, [], {}):
                 self._record_failure(url, "empty_response", response.status_code)
                 return None
@@ -392,7 +411,15 @@ class FMPClient:
             ttl_seconds=self.cache_policy.estimates_ttl_seconds,
             allow_empty=True,
         )
-        return [dict(row) for row in data] if isinstance(data, list) else []
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            # A non-list payload (an HTTP-200 error object that slipped into
+            # the cache before validation existed, or any other malformed
+            # shape) is a provider failure, never an empty consensus.
+            self._record_failure(f"{self.STABLE_URL}/analyst-estimates", "unexpected_payload_shape")
+            return []
+        return [dict(row) for row in data]
 
     def get_income_statement(
         self, symbol: str, *, period: str = "annual", limit: int = 6

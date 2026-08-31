@@ -2164,16 +2164,21 @@ def execute_collect_estimates(
             # record it as a fetch failure and leave the symbol uncollected.
             fetch_failed_symbols.append(symbol)
             continue
-        if cache_hit and not made_call:
+        if cache_hit:
+            # Any cache hit means the RETURNED data came from a cache — even
+            # when a failed stable HTTP attempt (which counts as a call) fell
+            # back to the v3 cache — so the row keeps its ORIGINAL fetch
+            # time. Unknown provenance stays null; stamping "now" would let
+            # stale data pass PR B's staleness gate (fail closed).
             cached_at = _analyst_estimates_cache_created_at(client, symbol)
             retrieved_at = (
-                datetime.fromtimestamp(cached_at, tz=timezone.utc)
+                datetime.fromtimestamp(cached_at, tz=timezone.utc).isoformat()
                 if cached_at is not None
-                else datetime.now(timezone.utc)
+                else None
             )
             served_from_cache = True
         else:
-            retrieved_at = datetime.now(timezone.utc)
+            retrieved_at = datetime.now(timezone.utc).isoformat()
             served_from_cache = False
         [normalized] = normalize_estimate_frame(
             [listing],
@@ -2190,7 +2195,7 @@ def execute_collect_estimates(
             minimum_plausible_forward_pe=float(config.get("minimum_plausible_forward_pe", 2.0)),
         )
         record["snapshot_shard"] = shard_index
-        record["snapshot_retrieved_at"] = retrieved_at.isoformat()
+        record["snapshot_retrieved_at"] = retrieved_at
         record["snapshot_served_from_cache"] = served_from_cache
         buffered.append(record)
         if len(buffered) >= 25:
@@ -2202,12 +2207,15 @@ def execute_collect_estimates(
     all_rows = snapshot_store.load_shard_rows(snapshot_dir, shard_index)
     classified: dict[str, int] = {}
     retrieved_stamps: list[str] = []
+    retrieval_time_unknown = 0
     for row in all_rows:
         name = str(row.get("snapshot_classification") or "no_estimates")
         classified[name] = classified.get(name, 0) + 1
         stamp = row.get("snapshot_retrieved_at")
         if isinstance(stamp, str) and stamp:
             retrieved_stamps.append(stamp)
+        else:
+            retrieval_time_unknown += 1
     collected_this_run = len(all_rows) - len(existing)
     shard_complete = (
         len(all_rows) >= len(shard_listings) and not budget_exhausted and not fetch_failed_symbols
@@ -2234,6 +2242,7 @@ def execute_collect_estimates(
         fetch_failed=len(fetch_failed_symbols),
         oldest_retrieved_at=min(retrieved_stamps) if retrieved_stamps else None,
         newest_retrieved_at=max(retrieved_stamps) if retrieved_stamps else None,
+        retrieval_time_unknown=retrieval_time_unknown,
     )
     if shard_complete:
         status_label = "shard_complete"
@@ -2256,6 +2265,7 @@ def execute_collect_estimates(
         "budget_exhausted": budget_exhausted,
         "fetch_failed_count": len(fetch_failed_symbols),
         "fetch_failed_symbols": fetch_failed_symbols[:50],
+        "retrieval_time_unknown": retrieval_time_unknown,
         "snapshot": snapshot_store.snapshot_status(manifest),
         "provider_diagnostics": client.diagnostics(),
     }

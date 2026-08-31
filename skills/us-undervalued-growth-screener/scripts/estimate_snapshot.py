@@ -220,6 +220,7 @@ def update_shard(
     fetch_failed: int = 0,
     oldest_retrieved_at: str | None = None,
     newest_retrieved_at: str | None = None,
+    retrieval_time_unknown: int = 0,
 ) -> dict[str, Any]:
     if status not in {"pending", "partial", "complete"}:
         raise ValueError(f"unknown shard status {status!r}")
@@ -232,6 +233,7 @@ def update_shard(
         "fetch_failed": fetch_failed,
         "oldest_retrieved_at": oldest_retrieved_at,
         "newest_retrieved_at": newest_retrieved_at,
+        "retrieval_time_unknown": retrieval_time_unknown,
         "classified": dict(sorted(classified.items())),
     }
     manifest["shards"][str(shard_index)] = entry

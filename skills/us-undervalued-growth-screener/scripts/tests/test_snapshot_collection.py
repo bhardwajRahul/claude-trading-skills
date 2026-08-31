@@ -448,5 +448,166 @@ class NegativeEpsIntegrationTests(unittest.TestCase):
             self.assertEqual(result.summary["shard_classified"], {"negative_eps": 1})
 
 
+class _StubResponse:
+    def __init__(self, status_code: int, payload) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class Http200ErrorPayloadTests(unittest.TestCase):
+    """Round-3 review P0: HTTP-200 error objects are failures, never data."""
+
+    def _client(self, tmp: str, *, offline: bool = False, session_get=None):
+        from fmp_client import FMPClient
+
+        client = FMPClient(
+            api_key="test-key",  # pragma: allowlist secret
+            max_api_calls=10,
+            cache_path=Path(tmp) / "cache.sqlite",
+            raw_store_dir=Path(tmp) / "raw",
+            offline=offline,
+        )
+        if session_get is not None:
+            import types
+
+            client.session = types.SimpleNamespace(get=session_get)
+        return client
+
+    def _stable_key(self, client, symbol: str) -> str:
+        from fmp_client import SQLiteJsonCache
+
+        return SQLiteJsonCache.make_key(
+            f"{client.STABLE_URL}/analyst-estimates",
+            {"symbol": symbol, "period": "annual", "limit": 6},
+        )
+
+    def test_http200_error_object_is_failure_and_never_cached(self) -> None:
+        payload = {"Error Message": "plan limit reached"}
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self._client(
+                tmp, session_get=lambda url, params=None, timeout=None: _StubResponse(200, payload)
+            )
+            self.assertEqual(client.get_analyst_estimates("AAA"), [])
+            diag = client.diagnostics()
+            self.assertGreaterEqual(diag["failure_count"], 1)
+            self.assertEqual(diag["cache_hits"], 0)
+            self.assertIsNone(client.cache.get(self._stable_key(client, "AAA"), 10**9))
+
+    def test_previously_cached_error_object_is_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self._client(tmp, offline=True)
+            client.cache.put(self._stable_key(client, "AAA"), {"Error Message": "poisoned"})
+            self.assertEqual(client.get_analyst_estimates("AAA"), [])
+            diag = client.diagnostics()
+            self.assertGreaterEqual(diag["failure_count"], 1)
+            self.assertGreaterEqual(diag["cache_hits"], 1)
+
+    def test_cached_error_object_becomes_fetch_failure_in_collect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            client = self._client(tmp, offline=True)
+            client.cache.put(self._stable_key(client, "AAA"), {"Error Message": "poisoned"})
+            result = PIPELINE.execute_collect_estimates(
+                client,
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            self.assertEqual(result.summary["status"], "shard_partial_fetch_failures")
+            self.assertEqual(result.summary["shard_classified"], {})
+
+
+class CacheProvenanceTests(unittest.TestCase):
+    """Round-3 review P1: cache-served data keeps its original fetch time."""
+
+    def test_stable_http_failure_with_v3_cache_hit_keeps_cache_time(self) -> None:
+        import sqlite3 as _sqlite3
+        import time as _time
+
+        from fmp_client import FMPClient, SQLiteJsonCache
+
+        # One hour ago: old enough to differ from "now", young enough to
+        # survive the estimates cache TTL.
+        fixed_created_at = float(int(_time.time() - 3600.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("CPV")], shard_count=1, as_of=AS_OF)
+            client = FMPClient(
+                api_key="test-key",  # pragma: allowlist secret
+                max_api_calls=10,
+                cache_path=Path(tmp) / "cache.sqlite",
+                raw_store_dir=Path(tmp) / "raw",
+            )
+            import types
+
+            client.session = types.SimpleNamespace(
+                get=lambda url, params=None, timeout=None: _StubResponse(500, None)
+            )
+            v3_key = SQLiteJsonCache.make_key(
+                f"{client.V3_URL}/analyst-estimates/CPV", {"period": "annual", "limit": 6}
+            )
+            client.cache.put(v3_key, _estimate_rows())
+            with _sqlite3.connect(str(client.cache.path)) as connection:
+                connection.execute(
+                    "UPDATE responses SET created_at = ? WHERE cache_key = ?",
+                    (fixed_created_at, v3_key),
+                )
+                connection.commit()
+            result = PIPELINE.execute_collect_estimates(
+                client,
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            self.assertEqual(result.summary["shard_classified"], {"evaluable": 1})
+            [row] = SNAP.load_shard_rows(snapshot_dir, 0)
+            self.assertTrue(row["snapshot_served_from_cache"])
+            expected = datetime.fromtimestamp(fixed_created_at, tz=timezone.utc).isoformat()
+            self.assertEqual(row["snapshot_retrieved_at"], expected)
+
+    def test_unknown_cache_provenance_stays_null(self) -> None:
+        class UnknownCacheClient:
+            def __init__(self, estimates):
+                self._estimates = estimates
+                self.hits = 0
+
+            def get_analyst_estimates(self, symbol: str, *, period: str = "annual", limit: int = 6):
+                self.hits += 1
+                return self._estimates.get(symbol, [])
+
+            def diagnostics(self) -> dict:
+                return {"api_calls_made": 0, "cache_hits": self.hits, "failure_count": 0}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            result = PIPELINE.execute_collect_estimates(
+                UnknownCacheClient({"AAA": _estimate_rows()}),
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            [row] = SNAP.load_shard_rows(snapshot_dir, 0)
+            self.assertIsNone(row["snapshot_retrieved_at"])
+            self.assertTrue(row["snapshot_served_from_cache"])
+            self.assertEqual(result.summary["retrieval_time_unknown"], 1)
+            entry = SNAP.load_manifest(snapshot_dir)["shards"]["0"]
+            self.assertEqual(entry["retrieval_time_unknown"], 1)
+            self.assertIsNone(entry["oldest_retrieved_at"])
+
+
 if __name__ == "__main__":
     unittest.main()
