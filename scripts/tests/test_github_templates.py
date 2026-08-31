@@ -262,6 +262,7 @@ def test_pull_request_template_matches_local_and_ci_gates() -> None:
         "python3 scripts/check_skill_catalog.py",
         "python3 skills/trading-skills-navigator/scripts/build_snapshot.py --check",
         "python3 scripts/generate_fmp_client.py --check",
+        "python3 scripts/generate_market_calendar.py --check",
         "python3 scripts/check_package_drift_for_changed_skills.py",
         FMP_PACKAGE_DRIFT_COMMAND,
     ]
