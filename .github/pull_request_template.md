@@ -38,7 +38,6 @@ Mark non-applicable items as N/A and explain them under reviewer notes. / 非該
 - [ ] Website EN/JA skill catalogs passed `python3 scripts/check_skill_catalog.py`. / Webサイト英日skill catalogのcanonical dataを確認しました。
 - [ ] Navigator snapshot passed `python3 skills/trading-skills-navigator/scripts/build_snapshot.py --check`. / navigator snapshotを確認しました。
 - [ ] Vendored FMP clients passed `python3 scripts/generate_fmp_client.py --check`. / FMP clientのdriftを確認しました。
-- [ ] Shared market calendar passed `python3 scripts/generate_market_calendar.py --check`. / 共通market calendarのdriftを確認しました。
 - [ ] Changed skill packages passed `python3 scripts/check_package_drift_for_changed_skills.py`. / 変更skillのpackage driftを確認しました。
 - [ ] FMP package mirrors passed the repository CI command below. / FMP package mirrorのdriftを確認しました。
 
