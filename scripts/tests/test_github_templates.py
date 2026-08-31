@@ -321,7 +321,9 @@ def test_website_skill_catalog_guard_is_wired_to_pre_commit_and_metadata_ci() ->
     steps = metadata.get("steps")
     assert isinstance(steps, list)
     matching_steps = [
-        step for step in steps if step.get("run") == "python3 scripts/check_skill_catalog.py"
+        step
+        for step in steps
+        if step.get("run") == "python3 scripts/generate_catalog_from_index.py --check"
     ]
     assert len(matching_steps) == 1
-    assert matching_steps[0].get("name") == "Website EN/JA skill catalog check"
+    assert matching_steps[0].get("name") == "README catalog drift check"
