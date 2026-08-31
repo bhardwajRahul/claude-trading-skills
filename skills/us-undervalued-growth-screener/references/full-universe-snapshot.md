@@ -61,20 +61,28 @@ python3 scripts/run_pipeline.py \
   / expected / fetch-failed counts, per-bucket classification, `as_of`,
   retrieval bounds, and calls used.
 
-## Readiness invariants (enforced before `screen-full-snapshot`, PR B)
+## Readiness (enforced before `screen-full-snapshot`, PR B)
 
-1. Every shard `status: complete` (zero `fetch_failed`).
-2. Classification counts sum EXACTLY to the frozen universe count.
-3. `retrieval_time_unknown == 0` across all shards — every row's fetch
-   provenance is known (`freshness_provenance_complete: true`).
-4. Staleness is measured from the ACTUAL aggregated `oldest_retrieved_at` /
-   `newest_retrieved_at`, never from the operator-supplied `analysis_as_of`;
-   the oldest stamp must fall within the configured staleness bound (stale
-   shards must be re-collected).
+Two layers, deliberately separate:
 
-`snapshot_status()` reports all of this plus a single `ready_for_screening`
-verdict; only a run screened from a snapshot with `ready_for_screening:
-true` may emit `ranking_scope: final_marketwide`.
+- **`snapshot_status(manifest)` → `collection_ready`** — manifest-level
+  aggregation only (all shards complete with zero `fetch_failed`,
+  classification counts summing exactly to the frozen universe,
+  `retrieval_time_unknown == 0`). It trusts the manifest's own counters and
+  therefore proves nothing about the shard files.
+- **`verify_snapshot(snapshot_dir, screening_as_of=..., max_staleness_days=...)`
+  → `ready_for_screening`** — the ONLY source of the screening verdict. It
+  re-reads every `shard-*.jsonl` and verifies against the frozen universe:
+  file presence and SHA-256 vs the manifest, no duplicate symbols, every
+  symbol in the frozen universe and in its `stable_shard` shard, the union
+  covering the universe EXACTLY, classifications limited to allowed values,
+  per-shard counts matching the manifest — plus staleness measured from the
+  ACTUAL aggregated `oldest_retrieved_at` against
+  `screening_as_of - max_staleness_days` (never the operator-supplied
+  collection `as_of`).
+
+Only a run screened from a snapshot whose `verify_snapshot` verdict is
+`ready_for_screening: true` may emit `ranking_scope: final_marketwide`.
 
 ## Operating on the FMP Starter plan
 

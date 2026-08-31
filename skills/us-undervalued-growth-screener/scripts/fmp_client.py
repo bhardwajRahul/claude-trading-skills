@@ -48,13 +48,25 @@ def _is_provider_error_payload(payload: Any) -> bool:
     return bool(keys & _PROVIDER_ERROR_KEYS)
 
 
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return number == number and number not in (float("inf"), float("-inf"))
+
+
 def _valid_estimates_payload(payload: Any) -> bool:
     """Schema gate for analyst-estimates payloads (pre-cache AND on cache read).
 
     A genuinely empty list is valid (no consensus). Anything else must be a
     list of mappings that are not provider error objects and that carry a
-    date plus at least one eps/revenue field — ``[{"Error Message": ...}]``
-    is an outage, never data.
+    PARSEABLE date plus at least one eps/revenue field holding a FINITE
+    number — ``[{"Error Message": ...}]`` is an outage, and
+    ``[{"date": "not-a-date", "epsAvg": null}]`` is unusable noise; neither
+    may complete a symbol as "no estimates".
     """
     if payload == []:
         return True
@@ -63,10 +75,17 @@ def _valid_estimates_payload(payload: Any) -> bool:
     for row in payload:
         if not isinstance(row, dict) or _is_provider_error_payload(row):
             return False
-        keys = {str(key).strip().lower() for key in row}
-        if "date" not in keys:
+        date_text = str(row.get("date") or "")[:10]
+        try:
+            time.strptime(date_text, "%Y-%m-%d")
+        except ValueError:
             return False
-        if not any("eps" in key or "revenue" in key for key in keys):
+        has_finite_estimate = any(
+            ("eps" in str(key).strip().lower() or "revenue" in str(key).strip().lower())
+            and _finite_number(value)
+            for key, value in row.items()
+        )
+        if not has_finite_estimate:
             return False
     return True
 

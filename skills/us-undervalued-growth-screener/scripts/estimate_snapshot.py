@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -224,6 +224,8 @@ def update_shard(
 ) -> dict[str, Any]:
     if status not in {"pending", "partial", "complete"}:
         raise ValueError(f"unknown shard status {status!r}")
+    path = shard_path(snapshot_dir, shard_index)
+    shard_sha256 = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
     entry = {
         "status": status,
         "as_of": as_of,
@@ -234,6 +236,7 @@ def update_shard(
         "oldest_retrieved_at": oldest_retrieved_at,
         "newest_retrieved_at": newest_retrieved_at,
         "retrieval_time_unknown": retrieval_time_unknown,
+        "shard_sha256": shard_sha256,
         "classified": dict(sorted(classified.items())),
     }
     manifest["shards"][str(shard_index)] = entry
@@ -300,10 +303,114 @@ def snapshot_status(manifest: Mapping[str, Any]) -> dict[str, Any]:
         # The round-7 invariant: every frozen symbol is classified, exactly.
         "classification_matches_universe": classification_matches_universe,
         "freshness_provenance_complete": freshness_provenance_complete,
-        "ready_for_screening": (
+        # Manifest-level aggregation ONLY: says nothing about the shard
+        # files' actual contents or staleness. ready_for_screening comes
+        # exclusively from verify_snapshot(), which re-reads and verifies
+        # every shard row against the frozen universe.
+        "collection_ready": (
             all_shards_complete
             and classification_matches_universe
             and fetch_failed_total == 0
             and freshness_provenance_complete
         ),
+    }
+
+
+def verify_snapshot(
+    snapshot_dir: Path,
+    *,
+    screening_as_of: datetime,
+    max_staleness_days: float,
+) -> dict[str, Any]:
+    """Deep readiness verification against the ACTUAL snapshot contents.
+
+    ``snapshot_status`` trusts the manifest's own counters; a tampered,
+    truncated or swapped ``shard-*.jsonl`` would sail through it. This
+    function re-reads every shard file and verifies, symbol by symbol:
+
+    - the frozen universe itself (schema/count/uniqueness/SHA-256);
+    - each shard file's SHA-256 against the manifest;
+    - no duplicate symbols within or across shards;
+    - every symbol belongs to its shard per ``stable_shard``;
+    - every symbol is in the frozen universe, and the union of shard
+      symbols covers the frozen universe EXACTLY;
+    - every classification is an allowed value, and per-shard counts match
+      the manifest;
+    - staleness measured from the ACTUAL oldest retrieval stamp against
+      ``screening_as_of - max_staleness_days`` (never the operator-supplied
+      collection ``as_of``).
+
+    ``ready_for_screening`` is true ONLY when all of the above hold and the
+    manifest-level ``collection_ready`` aggregation agrees.
+    """
+    if max_staleness_days <= 0:
+        raise ValueError("max_staleness_days must be positive")
+    manifest = load_manifest(snapshot_dir)
+    problems: list[str] = []
+    try:
+        universe = load_verified_universe(snapshot_dir, manifest)
+    except ValueError as exc:
+        universe = []
+        problems.append(str(exc))
+    expected_symbols = {str(row.get("symbol") or "") for row in universe}
+    shard_count = int(manifest.get("shard_count") or 0)
+    seen: dict[str, int] = {}
+    for index in range(shard_count):
+        entry = (manifest.get("shards") or {}).get(str(index)) or {}
+        path = shard_path(snapshot_dir, index)
+        if not path.exists():
+            if int(entry.get("attempted") or 0) > 0:
+                problems.append(f"shard {index}: file missing but manifest records rows")
+            continue
+        recorded_sha = entry.get("shard_sha256")
+        actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        if isinstance(recorded_sha, str) and recorded_sha and recorded_sha != actual_sha:
+            problems.append(f"shard {index}: file SHA-256 does not match the manifest")
+        recount: dict[str, int] = {}
+        for row in load_shard_rows(snapshot_dir, index):
+            symbol = str(row.get("symbol") or "")
+            if not symbol:
+                problems.append(f"shard {index}: row without a symbol")
+                continue
+            if symbol in seen:
+                problems.append(f"shard {index}: duplicate symbol {symbol}")
+                continue
+            seen[symbol] = index
+            if expected_symbols and symbol not in expected_symbols:
+                problems.append(f"shard {index}: {symbol} is not in the frozen universe")
+            if shard_count and stable_shard(symbol, shard_count) != index:
+                problems.append(f"shard {index}: {symbol} belongs to another shard")
+            name = str(row.get("snapshot_classification") or "")
+            if name not in CLASSIFICATIONS:
+                problems.append(f"shard {index}: {symbol} has classification {name!r}")
+            recount[name] = recount.get(name, 0) + 1
+        recorded = {key: int(value or 0) for key, value in (entry.get("classified") or {}).items()}
+        if recorded != recount:
+            problems.append(f"shard {index}: manifest classification counts do not match the file")
+    missing = expected_symbols - set(seen)
+    if missing:
+        problems.append(
+            f"{len(missing)} frozen-universe symbols never collected (e.g. {sorted(missing)[:5]})"
+        )
+    status = snapshot_status(manifest)
+    oldest = status.get("oldest_retrieved_at")
+    staleness_ok = False
+    if isinstance(oldest, str) and oldest:
+        try:
+            oldest_dt = datetime.fromisoformat(oldest)
+            if oldest_dt.tzinfo is None:
+                oldest_dt = oldest_dt.replace(tzinfo=timezone.utc)
+            staleness_ok = oldest_dt >= screening_as_of - timedelta(days=float(max_staleness_days))
+        except ValueError:
+            problems.append(f"unparsable oldest_retrieved_at {oldest!r}")
+    verified = not problems
+    return {
+        **status,
+        "screening_as_of": screening_as_of.astimezone(timezone.utc).isoformat(),
+        "max_staleness_days": float(max_staleness_days),
+        "staleness_ok": staleness_ok,
+        "problem_count": len(problems),
+        "problems": problems[:50],
+        "contents_verified": verified,
+        "ready_for_screening": verified and bool(status.get("collection_ready")) and staleness_ok,
     }

@@ -6,7 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
@@ -552,6 +552,24 @@ class Http200ErrorPayloadTests(unittest.TestCase):
             self.assertGreaterEqual(client.diagnostics()["failure_count"], 1)
             self.assertIsNotNone(client.cache.get(key, 10**9))  # replaced with valid data
 
+    def test_nonempty_unusable_payload_is_failure_not_no_estimates(self) -> None:
+        # Round-5 review P0: a non-empty payload that cannot yield a single
+        # valid estimate period is unusable noise, not "no estimates".
+        for payload in (
+            [{"date": "not-a-date", "epsAvg": None}],
+            [{"date": "2026-12-31", "epsAvg": None, "revenueAvg": None}],
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                client = self._client(
+                    tmp,
+                    session_get=lambda url, params=None, timeout=None, p=payload: _StubResponse(
+                        200, p
+                    ),
+                )
+                result = client.get_analyst_estimates_detailed("AAA")
+                self.assertEqual(result["status"], "failed", payload)
+                self.assertIsNone(client.cache.get(self._stable_key(client, "AAA"), 10**9))
+
     def test_stable_failure_with_v3_empty_success_is_no_estimates(self) -> None:
         # Round-4 review P1: stable HTTP 500 followed by a SUCCESSFUL empty
         # v3 response is a genuine empty consensus, not a fetch failure.
@@ -691,7 +709,7 @@ class CacheProvenanceTests(unittest.TestCase):
             status = SNAP.snapshot_status(SNAP.load_manifest(snapshot_dir))
             self.assertTrue(status["all_shards_complete"])
             self.assertFalse(status["freshness_provenance_complete"])
-            self.assertFalse(status["ready_for_screening"])
+            self.assertFalse(status["collection_ready"])
 
 
 class SnapshotReadinessTests(unittest.TestCase):
@@ -716,7 +734,8 @@ class SnapshotReadinessTests(unittest.TestCase):
             self.assertEqual(status["retrieval_time_unknown_total"], 0)
             self.assertEqual(status["fetch_failed_total"], 0)
             self.assertTrue(status["freshness_provenance_complete"])
-            self.assertTrue(status["ready_for_screening"])
+            self.assertTrue(status["collection_ready"])
+            self.assertNotIn("ready_for_screening", status)  # verify_snapshot only
             self.assertIsNotNone(status["oldest_retrieved_at"])
             self.assertIsNotNone(status["newest_retrieved_at"])
 
@@ -735,7 +754,85 @@ class SnapshotReadinessTests(unittest.TestCase):
             )
             status = SNAP.snapshot_status(SNAP.load_manifest(snapshot_dir))
             self.assertGreaterEqual(status["fetch_failed_total"], 1)
-            self.assertFalse(status["ready_for_screening"])
+            self.assertFalse(status["collection_ready"])
+
+
+class SnapshotVerificationTests(unittest.TestCase):
+    """Round-5 review P0: readiness must be proven against the ACTUAL files."""
+
+    def _build_clean(self, tmp: str) -> Path:
+        snapshot_dir = Path(tmp) / "snap"
+        universe = [_listing("AAA"), _listing("BBB")]
+        SNAP.create_snapshot(snapshot_dir, universe, shard_count=1, as_of=AS_OF)
+        result = PIPELINE.execute_collect_estimates(
+            FakeClient({row["symbol"]: _estimate_rows() for row in universe}),
+            _config(),
+            analysis_as_of=AS_OF,
+            snapshot_dir=snapshot_dir,
+            shard_index=0,
+            shard_count=1,
+            resume=False,
+        )
+        assert result.exit_code == 0
+        return snapshot_dir
+
+    def _verify(self, snapshot_dir: Path, **overrides) -> dict:
+        kwargs = {
+            "screening_as_of": datetime.now(timezone.utc),
+            "max_staleness_days": 7.0,
+        }
+        kwargs.update(overrides)
+        return SNAP.verify_snapshot(snapshot_dir, **kwargs)
+
+    def test_clean_snapshot_verifies_and_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            verdict = self._verify(self._build_clean(tmp))
+            self.assertTrue(verdict["contents_verified"], verdict["problems"])
+            self.assertTrue(verdict["staleness_ok"])
+            self.assertTrue(verdict["ready_for_screening"])
+
+    def test_swapped_shard_symbol_is_detected(self) -> None:
+        # The reviewer's reproduction: freeze AAA+BBB, then swap AAA -> ZZZ
+        # inside the shard file. Manifest counters still balance.
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = self._build_clean(tmp)
+            path = SNAP.shard_path(snapshot_dir, 0)
+            path.write_text(path.read_text().replace('"symbol": "AAA"', '"symbol": "ZZZ"'))
+            self.assertTrue(
+                SNAP.snapshot_status(SNAP.load_manifest(snapshot_dir))["collection_ready"]
+            )
+            verdict = self._verify(snapshot_dir)
+            self.assertFalse(verdict["contents_verified"])
+            self.assertFalse(verdict["ready_for_screening"])
+            text = " ".join(verdict["problems"])
+            self.assertIn("ZZZ", text)
+            self.assertIn("AAA", text)  # AAA reported as never collected
+
+    def test_missing_shard_file_is_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = self._build_clean(tmp)
+            SNAP.shard_path(snapshot_dir, 0).unlink()
+            verdict = self._verify(snapshot_dir)
+            self.assertFalse(verdict["ready_for_screening"])
+            self.assertTrue(any("file missing" in p for p in verdict["problems"]))
+
+    def test_duplicate_symbol_is_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = self._build_clean(tmp)
+            [row, *_] = SNAP.load_shard_rows(snapshot_dir, 0)
+            SNAP.append_shard_rows(snapshot_dir, 0, [row])
+            verdict = self._verify(snapshot_dir)
+            self.assertFalse(verdict["ready_for_screening"])
+            self.assertTrue(any("duplicate symbol" in p for p in verdict["problems"]))
+
+    def test_stale_snapshot_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = self._build_clean(tmp)
+            future = datetime.now(timezone.utc) + timedelta(days=30)
+            verdict = self._verify(snapshot_dir, screening_as_of=future, max_staleness_days=1.0)
+            self.assertTrue(verdict["contents_verified"])
+            self.assertFalse(verdict["staleness_ok"])
+            self.assertFalse(verdict["ready_for_screening"])
 
 
 if __name__ == "__main__":
