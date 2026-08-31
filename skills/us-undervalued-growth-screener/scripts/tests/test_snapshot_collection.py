@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +75,17 @@ class FakeClient:
             raise ApiCallBudgetExceeded("budget exhausted")
         self.calls += 1
         return self._estimates.get(symbol, [])
+
+    def get_analyst_estimates_detailed(
+        self, symbol: str, *, period: str = "annual", limit: int = 6
+    ) -> dict:
+        rows = self.get_analyst_estimates(symbol, period=period, limit=limit)
+        return {
+            "rows": rows,
+            "status": "ok" if rows else "empty",
+            "served_from_cache": False,
+            "retrieved_at": time.time(),
+        }
 
     def diagnostics(self) -> dict:
         return {"api_calls_made": self.calls, "cache_hits": 0, "failure_count": 0}
@@ -266,24 +278,28 @@ class CoverageSemanticsSharedTests(unittest.TestCase):
 
 
 class OfflineMissClient:
-    """Simulates offline mode with an empty cache: [] without any call/hit/failure."""
+    """Simulates offline mode with an empty cache: an explicit failed status."""
 
-    def get_analyst_estimates(self, symbol: str, *, period: str = "annual", limit: int = 6):
-        return []
+    def get_analyst_estimates_detailed(
+        self, symbol: str, *, period: str = "annual", limit: int = 6
+    ) -> dict:
+        return {"rows": [], "status": "failed", "served_from_cache": False, "retrieved_at": None}
 
     def diagnostics(self) -> dict:
         return {"api_calls_made": 0, "cache_hits": 0, "failure_count": 0}
 
 
 class HttpFailClient:
-    """Simulates HTTP failures: a call is made, a failure is recorded, [] returned."""
+    """Simulates HTTP failures: calls made, failures recorded, failed status."""
 
     def __init__(self) -> None:
         self.calls = 0
 
-    def get_analyst_estimates(self, symbol: str, *, period: str = "annual", limit: int = 6):
+    def get_analyst_estimates_detailed(
+        self, symbol: str, *, period: str = "annual", limit: int = 6
+    ) -> dict:
         self.calls += 1
-        return []
+        return {"rows": [], "status": "failed", "served_from_cache": False, "retrieved_at": None}
 
     def diagnostics(self) -> dict:
         return {"api_calls_made": self.calls, "cache_hits": 0, "failure_count": self.calls}
@@ -496,14 +512,70 @@ class Http200ErrorPayloadTests(unittest.TestCase):
             self.assertEqual(diag["cache_hits"], 0)
             self.assertIsNone(client.cache.get(self._stable_key(client, "AAA"), 10**9))
 
-    def test_previously_cached_error_object_is_failure(self) -> None:
+    def test_previously_cached_error_object_is_purged_and_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             client = self._client(tmp, offline=True)
-            client.cache.put(self._stable_key(client, "AAA"), {"Error Message": "poisoned"})
-            self.assertEqual(client.get_analyst_estimates("AAA"), [])
-            diag = client.diagnostics()
-            self.assertGreaterEqual(diag["failure_count"], 1)
-            self.assertGreaterEqual(diag["cache_hits"], 1)
+            key = self._stable_key(client, "AAA")
+            client.cache.put(key, {"Error Message": "poisoned"})
+            result = client.get_analyst_estimates_detailed("AAA")
+            self.assertEqual(result["status"], "failed")
+            self.assertGreaterEqual(client.diagnostics()["failure_count"], 1)
+            # the poisoned entry is purged so an online retry reaches HTTP
+            self.assertIsNone(client.cache.get(key, 10**9))
+
+    def test_error_object_inside_list_is_failure_and_never_cached(self) -> None:
+        # Round-4 review P0: [{"Error Message": ...}] hid the outage one
+        # level down and was accepted (and cached) as data.
+        payload = [{"Error Message": "plan limit reached"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self._client(
+                tmp, session_get=lambda url, params=None, timeout=None: _StubResponse(200, payload)
+            )
+            result = client.get_analyst_estimates_detailed("AAA")
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["rows"], [])
+            self.assertGreaterEqual(client.diagnostics()["failure_count"], 1)
+            self.assertIsNone(client.cache.get(self._stable_key(client, "AAA"), 10**9))
+
+    def test_poisoned_cache_is_purged_and_refetched_online(self) -> None:
+        good = _estimate_rows()
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self._client(
+                tmp, session_get=lambda url, params=None, timeout=None: _StubResponse(200, good)
+            )
+            key = self._stable_key(client, "AAA")
+            client.cache.put(key, [{"Error Message": "poisoned"}])
+            result = client.get_analyst_estimates_detailed("AAA")
+            self.assertEqual(result["status"], "ok")
+            self.assertFalse(result["served_from_cache"])
+            self.assertEqual(len(result["rows"]), len(good))
+            self.assertGreaterEqual(client.diagnostics()["failure_count"], 1)
+            self.assertIsNotNone(client.cache.get(key, 10**9))  # replaced with valid data
+
+    def test_stable_failure_with_v3_empty_success_is_no_estimates(self) -> None:
+        # Round-4 review P1: stable HTTP 500 followed by a SUCCESSFUL empty
+        # v3 response is a genuine empty consensus, not a fetch failure.
+        def _get(url, params=None, timeout=None):
+            if "/stable/" in url:
+                return _StubResponse(500, None)
+            return _StubResponse(200, [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            client = self._client(tmp, session_get=_get)
+            result = PIPELINE.execute_collect_estimates(
+                client,
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.summary["status"], "shard_complete")
+            self.assertEqual(result.summary["shard_classified"], {"no_estimates": 1})
 
     def test_cached_error_object_becomes_fetch_failure_in_collect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -581,9 +653,16 @@ class CacheProvenanceTests(unittest.TestCase):
                 self._estimates = estimates
                 self.hits = 0
 
-            def get_analyst_estimates(self, symbol: str, *, period: str = "annual", limit: int = 6):
+            def get_analyst_estimates_detailed(
+                self, symbol: str, *, period: str = "annual", limit: int = 6
+            ) -> dict:
                 self.hits += 1
-                return self._estimates.get(symbol, [])
+                return {
+                    "rows": self._estimates.get(symbol, []),
+                    "status": "ok",
+                    "served_from_cache": True,
+                    "retrieved_at": None,
+                }
 
             def diagnostics(self) -> dict:
                 return {"api_calls_made": 0, "cache_hits": self.hits, "failure_count": 0}
@@ -607,6 +686,56 @@ class CacheProvenanceTests(unittest.TestCase):
             entry = SNAP.load_manifest(snapshot_dir)["shards"]["0"]
             self.assertEqual(entry["retrieval_time_unknown"], 1)
             self.assertIsNone(entry["oldest_retrieved_at"])
+            # Round-4 review: unknown provenance blocks screening readiness
+            # even when collection itself is complete.
+            status = SNAP.snapshot_status(SNAP.load_manifest(snapshot_dir))
+            self.assertTrue(status["all_shards_complete"])
+            self.assertFalse(status["freshness_provenance_complete"])
+            self.assertFalse(status["ready_for_screening"])
+
+
+class SnapshotReadinessTests(unittest.TestCase):
+    """Round-4 review P1: readiness = collection + classification + provenance."""
+
+    def test_clean_complete_snapshot_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            PIPELINE.execute_collect_estimates(
+                FakeClient({"AAA": _estimate_rows()}),
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            status = SNAP.snapshot_status(SNAP.load_manifest(snapshot_dir))
+            self.assertTrue(status["all_shards_complete"])
+            self.assertTrue(status["classification_matches_universe"])
+            self.assertEqual(status["retrieval_time_unknown_total"], 0)
+            self.assertEqual(status["fetch_failed_total"], 0)
+            self.assertTrue(status["freshness_provenance_complete"])
+            self.assertTrue(status["ready_for_screening"])
+            self.assertIsNotNone(status["oldest_retrieved_at"])
+            self.assertIsNotNone(status["newest_retrieved_at"])
+
+    def test_fetch_failures_block_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            PIPELINE.execute_collect_estimates(
+                OfflineMissClient(),
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            status = SNAP.snapshot_status(SNAP.load_manifest(snapshot_dir))
+            self.assertGreaterEqual(status["fetch_failed_total"], 1)
+            self.assertFalse(status["ready_for_screening"])
 
 
 if __name__ == "__main__":

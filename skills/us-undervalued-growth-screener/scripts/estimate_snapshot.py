@@ -247,23 +247,63 @@ def snapshot_status(manifest: Mapping[str, Any]) -> dict[str, Any]:
     totals: dict[str, int] = {name: 0 for name in CLASSIFICATIONS}
     complete = 0
     attempted_total = 0
+    fetch_failed_total = 0
+    retrieval_time_unknown_total = 0
+    oldest_retrieved: str | None = None
+    newest_retrieved: str | None = None
     for entry in shards.values():
         if entry.get("status") == "complete":
             complete += 1
         attempted_total += int(entry.get("attempted") or 0)
+        fetch_failed_total += int(entry.get("fetch_failed") or 0)
+        retrieval_time_unknown_total += int(entry.get("retrieval_time_unknown") or 0)
+        oldest = entry.get("oldest_retrieved_at")
+        if (
+            isinstance(oldest, str)
+            and oldest
+            and (oldest_retrieved is None or oldest < oldest_retrieved)
+        ):
+            oldest_retrieved = oldest
+        newest = entry.get("newest_retrieved_at")
+        if (
+            isinstance(newest, str)
+            and newest
+            and (newest_retrieved is None or newest > newest_retrieved)
+        ):
+            newest_retrieved = newest
         for name, count in (entry.get("classified") or {}).items():
             totals[name] = totals.get(name, 0) + int(count or 0)
     universe_count = int(manifest.get("universe_count") or 0)
     classified_total = sum(totals.values())
+    all_shards_complete = complete == int(manifest.get("shard_count") or 0)
+    classification_matches_universe = classified_total == universe_count
+    # Round-4 review: collection completeness and freshness provenance are
+    # SEPARATE readiness axes — a shard full of unknown-provenance rows must
+    # never look screenable, and staleness is judged from the ACTUAL
+    # oldest/newest retrieval stamps, not the operator-supplied as_of.
+    freshness_provenance_complete = retrieval_time_unknown_total == 0 and (
+        attempted_total == 0 or (oldest_retrieved is not None and newest_retrieved is not None)
+    )
     return {
         "snapshot_id": manifest.get("snapshot_id"),
         "shard_count": int(manifest.get("shard_count") or 0),
         "complete_shards": complete,
-        "all_shards_complete": complete == int(manifest.get("shard_count") or 0),
+        "all_shards_complete": all_shards_complete,
         "attempted_total": attempted_total,
+        "fetch_failed_total": fetch_failed_total,
+        "retrieval_time_unknown_total": retrieval_time_unknown_total,
+        "oldest_retrieved_at": oldest_retrieved,
+        "newest_retrieved_at": newest_retrieved,
         "classified_totals": totals,
         "classified_total": classified_total,
         "universe_count": universe_count,
         # The round-7 invariant: every frozen symbol is classified, exactly.
-        "classification_matches_universe": classified_total == universe_count,
+        "classification_matches_universe": classification_matches_universe,
+        "freshness_provenance_complete": freshness_provenance_complete,
+        "ready_for_screening": (
+            all_shards_complete
+            and classification_matches_universe
+            and fetch_failed_total == 0
+            and freshness_provenance_complete
+        ),
     }

@@ -63,13 +63,18 @@ python3 scripts/run_pipeline.py \
 
 ## Readiness invariants (enforced before `screen-full-snapshot`, PR B)
 
-1. Every shard `status: complete`.
+1. Every shard `status: complete` (zero `fetch_failed`).
 2. Classification counts sum EXACTLY to the frozen universe count.
-3. The spread between the oldest and newest shard `as_of` is bounded
-   (stale shards must be re-collected).
+3. `retrieval_time_unknown == 0` across all shards — every row's fetch
+   provenance is known (`freshness_provenance_complete: true`).
+4. Staleness is measured from the ACTUAL aggregated `oldest_retrieved_at` /
+   `newest_retrieved_at`, never from the operator-supplied `analysis_as_of`;
+   the oldest stamp must fall within the configured staleness bound (stale
+   shards must be re-collected).
 
-Only a run screened from a snapshot satisfying all three may emit
-`ranking_scope: final_marketwide`.
+`snapshot_status()` reports all of this plus a single `ready_for_screening`
+verdict; only a run screened from a snapshot with `ready_for_screening:
+true` may emit `ranking_scope: final_marketwide`.
 
 ## Operating on the FMP Starter plan
 

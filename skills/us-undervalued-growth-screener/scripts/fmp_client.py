@@ -48,6 +48,29 @@ def _is_provider_error_payload(payload: Any) -> bool:
     return bool(keys & _PROVIDER_ERROR_KEYS)
 
 
+def _valid_estimates_payload(payload: Any) -> bool:
+    """Schema gate for analyst-estimates payloads (pre-cache AND on cache read).
+
+    A genuinely empty list is valid (no consensus). Anything else must be a
+    list of mappings that are not provider error objects and that carry a
+    date plus at least one eps/revenue field — ``[{"Error Message": ...}]``
+    is an outage, never data.
+    """
+    if payload == []:
+        return True
+    if not isinstance(payload, list):
+        return False
+    for row in payload:
+        if not isinstance(row, dict) or _is_provider_error_payload(row):
+            return False
+        keys = {str(key).strip().lower() for key in row}
+        if "date" not in keys:
+            return False
+        if not any("eps" in key or "revenue" in key for key in keys):
+            return False
+    return True
+
+
 class ApiCallBudgetExceeded(RuntimeError):
     """Raised when the configured provider-call ceiling is reached."""
 
@@ -94,7 +117,8 @@ class SQLiteJsonCache:
         )
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
-    def get(self, key: str, ttl_seconds: int) -> Any | None:
+    def get_entry(self, key: str, ttl_seconds: int) -> tuple[Any, float] | None:
+        """Return (payload, created_at) for a fresh entry, else None."""
         row = self._connection.execute(
             "SELECT created_at, payload FROM responses WHERE cache_key = ?", (key,)
         ).fetchone()
@@ -102,15 +126,21 @@ class SQLiteJsonCache:
             return None
         created_at, payload = row
         if ttl_seconds >= 0 and time.time() - float(created_at) > ttl_seconds:
-            self._connection.execute("DELETE FROM responses WHERE cache_key = ?", (key,))
-            self._connection.commit()
+            self.delete(key)
             return None
         try:
-            return json.loads(payload)
+            return json.loads(payload), float(created_at)
         except json.JSONDecodeError:
-            self._connection.execute("DELETE FROM responses WHERE cache_key = ?", (key,))
-            self._connection.commit()
+            self.delete(key)
             return None
+
+    def get(self, key: str, ttl_seconds: int) -> Any | None:
+        entry = self.get_entry(key, ttl_seconds)
+        return entry[0] if entry is not None else None
+
+    def delete(self, key: str) -> None:
+        self._connection.execute("DELETE FROM responses WHERE cache_key = ?", (key,))
+        self._connection.commit()
 
     def put(self, key: str, payload: Any) -> None:
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -149,6 +179,10 @@ class FMPClient:
     ):
         self.api_key = api_key or os.getenv("FMP_API_KEY")
         self.offline = bool(offline)
+        # Provenance of the payload returned by the most recent
+        # _request_json call: {"source": "cache"|"http"|None,
+        # "retrieved_at": epoch float|None}. Single-threaded CLI client.
+        self._last_response_meta: dict[str, Any] = {"source": None, "retrieved_at": None}
         if not self.api_key and not self.offline:
             raise ValueError("FMP API key required. Set FMP_API_KEY or pass api_key.")
         self.max_api_calls = int(max_api_calls)
@@ -227,14 +261,25 @@ class FMPClient:
         ttl_seconds: int | None = None,
         allow_empty: bool = False,
         quiet: bool = False,
+        validate: Any | None = None,
     ) -> Any | None:
         request_params = dict(params or {})
         ttl = self.cache_policy.default_ttl_seconds if ttl_seconds is None else int(ttl_seconds)
         cache_key = SQLiteJsonCache.make_key(url, request_params)
-        cached = self.cache.get(cache_key, ttl)
-        if cached is not None:
-            self.cache_hits += 1
-            return cached
+        self._last_response_meta = {"source": None, "retrieved_at": None}
+        entry = self.cache.get_entry(cache_key, ttl)
+        if entry is not None:
+            cached, created_at = entry
+            if validate is not None and not validate(cached):
+                # A payload cached before validation existed (or by another
+                # tool) must not keep short-circuiting retries: purge it and
+                # fall through to a fresh HTTP attempt.
+                self._record_failure(url, "cached_payload_invalid")
+                self.cache.delete(cache_key)
+            else:
+                self.cache_hits += 1
+                self._last_response_meta = {"source": "cache", "retrieved_at": created_at}
+                return cached
         if self.offline:
             return None
         if url in self._disabled_endpoints:
@@ -291,12 +336,21 @@ class FMPClient:
                 if not quiet:
                     print(f"WARN: FMP returned an error payload: {url}", file=sys.stderr)
                 return None
+            if validate is not None and not validate(payload):
+                # Same outage class hidden one level down (e.g. an error
+                # object INSIDE a list) or a shape the endpoint never
+                # produces: a failure, never cached.
+                self._record_failure(url, "schema_validation_failed", response.status_code)
+                if not quiet:
+                    print(f"WARN: FMP payload failed schema validation: {url}", file=sys.stderr)
+                return None
             if not allow_empty and payload in (None, [], {}):
                 self._record_failure(url, "empty_response", response.status_code)
                 return None
             self._endpoint_failures[url] = 0
             self.cache.put(cache_key, payload)
             self._write_raw(url=url, params=request_params, payload=payload)
+            self._last_response_meta = {"source": "http", "retrieved_at": time.time()}
             return payload
         self._record_failure(url, "rate_limit_exhausted", 429)
         return None
@@ -310,6 +364,7 @@ class FMPClient:
         v3_params: Mapping[str, Any] | None = None,
         ttl_seconds: int | None = None,
         allow_empty: bool = False,
+        validate: Any | None = None,
     ) -> Any | None:
         stable_url = f"{self.STABLE_URL}/{stable_endpoint.lstrip('/')}"
         data = self._request_json(
@@ -318,6 +373,7 @@ class FMPClient:
             ttl_seconds=ttl_seconds,
             allow_empty=allow_empty,
             quiet=v3_endpoint is not None,
+            validate=validate,
         )
         if data is not None:
             return data
@@ -329,6 +385,7 @@ class FMPClient:
             v3_params if v3_params is not None else stable_params,
             ttl_seconds=ttl_seconds,
             allow_empty=allow_empty,
+            validate=validate,
         )
 
     def get_company_screener(
@@ -400,9 +457,19 @@ class FMPClient:
             data = data.get("historical") or data.get("historicalStockList") or []
         return [dict(row) for row in data] if isinstance(data, list) else []
 
-    def get_analyst_estimates(
+    def get_analyst_estimates_detailed(
         self, symbol: str, *, period: str = "annual", limit: int = 6
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
+        """Structured estimates fetch tied to the ACTUALLY adopted response.
+
+        Returns ``{"rows", "status", "served_from_cache", "retrieved_at"}``
+        where status is ``ok`` (validated rows), ``empty`` (a genuine empty
+        consensus from a successful response), or ``failed`` (any provider
+        failure — HTTP error, offline miss, error payload, schema failure).
+        ``retrieved_at`` is the epoch time the adopted payload was ACTUALLY
+        fetched over HTTP (a cache hit keeps the cache entry's creation
+        time); consumers must treat a missing value as unknown, never "now".
+        """
         data = self._stable_then_v3(
             "analyst-estimates",
             {"symbol": symbol, "period": period, "limit": int(limit)},
@@ -410,16 +477,28 @@ class FMPClient:
             v3_params={"period": period, "limit": int(limit)},
             ttl_seconds=self.cache_policy.estimates_ttl_seconds,
             allow_empty=True,
+            validate=_valid_estimates_payload,
         )
         if data is None:
-            return []
-        if not isinstance(data, list):
-            # A non-list payload (an HTTP-200 error object that slipped into
-            # the cache before validation existed, or any other malformed
-            # shape) is a provider failure, never an empty consensus.
-            self._record_failure(f"{self.STABLE_URL}/analyst-estimates", "unexpected_payload_shape")
-            return []
-        return [dict(row) for row in data]
+            return {
+                "rows": [],
+                "status": "failed",
+                "served_from_cache": False,
+                "retrieved_at": None,
+            }
+        meta = dict(self._last_response_meta)
+        rows = [dict(row) for row in data]
+        return {
+            "rows": rows,
+            "status": "ok" if rows else "empty",
+            "served_from_cache": meta.get("source") == "cache",
+            "retrieved_at": meta.get("retrieved_at"),
+        }
+
+    def get_analyst_estimates(
+        self, symbol: str, *, period: str = "annual", limit: int = 6
+    ) -> list[dict[str, Any]]:
+        return self.get_analyst_estimates_detailed(symbol, period=period, limit=limit)["rows"]
 
     def get_income_statement(
         self, symbol: str, *, period: str = "annual", limit: int = 6

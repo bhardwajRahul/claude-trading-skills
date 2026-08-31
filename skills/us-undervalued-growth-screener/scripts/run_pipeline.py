@@ -14,7 +14,6 @@ import json
 import math
 import os
 import re
-import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -26,7 +25,7 @@ from zoneinfo import ZoneInfo
 import estimate_snapshot as snapshot_store
 from build_provider_prefilter_pool import ALLOWED_LANES, _lane_score, build_pool
 from coverage_semantics import build_coverage_block, classify_ranking_scope
-from fmp_client import ApiCallBudgetExceeded, FMPClient, SQLiteJsonCache
+from fmp_client import ApiCallBudgetExceeded, FMPClient
 from normalize_estimates import apply_verified_actual_eps, normalize_symbol
 from screen_universe import DEFAULTS as SCREEN_DEFAULTS
 from screen_universe import (
@@ -2025,48 +2024,6 @@ def execute_pipeline(
     return PipelineResult(summary=summary, exit_code=exit_code)
 
 
-def _analyst_estimates_cache_created_at(
-    client: Any, symbol: str, *, period: str = "annual", limit: int = 6
-) -> float | None:
-    """Best-effort creation time of the cached analyst-estimates payload.
-
-    Reads the client's SQLite response cache directly (stable and legacy-v3
-    keys) so a cache-served row can be stamped with the time the data was
-    ACTUALLY fetched over HTTP, not the current run's clock.
-    """
-    cache = getattr(client, "cache", None)
-    path = getattr(cache, "path", None)
-    stable_url = getattr(client, "STABLE_URL", None)
-    v3_url = getattr(client, "V3_URL", None)
-    if not path or not stable_url:
-        return None
-    try:
-        keys = [
-            SQLiteJsonCache.make_key(
-                f"{stable_url}/analyst-estimates",
-                {"symbol": symbol, "period": period, "limit": int(limit)},
-            )
-        ]
-        if v3_url:
-            keys.append(
-                SQLiteJsonCache.make_key(
-                    f"{v3_url}/analyst-estimates/{symbol}",
-                    {"period": period, "limit": int(limit)},
-                )
-            )
-        with sqlite3.connect(str(path)) as connection:
-            placeholders = ",".join("?" for _ in keys)
-            row = connection.execute(
-                # The interpolated fragment is only "?,?,..." bind markers;
-                # every value goes through sqlite parameter binding.
-                f"SELECT MAX(created_at) FROM responses WHERE cache_key IN ({placeholders})",  # nosec B608
-                keys,
-            ).fetchone()
-        return float(row[0]) if row and row[0] is not None else None
-    except (sqlite3.Error, OSError, ValueError):
-        return None
-
-
 def execute_collect_estimates(
     client: FMPClient,
     config: Mapping[str, Any],
@@ -2146,40 +2103,32 @@ def execute_collect_estimates(
     budget_exhausted = False
     for listing in pending:
         symbol = _symbol(listing)
-        before = client.diagnostics()
         try:
-            estimates = client.get_analyst_estimates(symbol, period="annual", limit=6)
+            fetched = client.get_analyst_estimates_detailed(symbol, period="annual", limit=6)
         except ApiCallBudgetExceeded:
             budget_exhausted = True
             break
-        after = client.diagnostics()
-        made_call = int(after.get("api_calls_made") or 0) > int(before.get("api_calls_made") or 0)
-        cache_hit = int(after.get("cache_hits") or 0) > int(before.get("cache_hits") or 0)
-        failed = int(after.get("failure_count") or 0) > int(before.get("failure_count") or 0)
-        if not estimates and (failed or not (made_call or cache_hit)):
-            # The client returns [] for HTTP failures, offline cache misses
-            # and invalid JSON as well as for genuinely empty consensus. A
-            # provider failure must NOT be classified as no_estimates (it
-            # would satisfy the marketwide invariant without ever fetching);
-            # record it as a fetch failure and leave the symbol uncollected.
+        if str(fetched.get("status")) == "failed":
+            # The client reports provider failures explicitly (HTTP errors,
+            # offline misses, HTTP-200 error payloads, schema failures);
+            # such a symbol stays UNCOLLECTED — a failure classified as
+            # no_estimates would satisfy the marketwide invariant without
+            # ever fetching anything.
             fetch_failed_symbols.append(symbol)
             continue
-        if cache_hit:
-            # Any cache hit means the RETURNED data came from a cache — even
-            # when a failed stable HTTP attempt (which counts as a call) fell
-            # back to the v3 cache — so the row keeps its ORIGINAL fetch
-            # time. Unknown provenance stays null; stamping "now" would let
-            # stale data pass PR B's staleness gate (fail closed).
-            cached_at = _analyst_estimates_cache_created_at(client, symbol)
-            retrieved_at = (
-                datetime.fromtimestamp(cached_at, tz=timezone.utc).isoformat()
-                if cached_at is not None
-                else None
-            )
-            served_from_cache = True
-        else:
-            retrieved_at = datetime.now(timezone.utc).isoformat()
-            served_from_cache = False
+        estimates = [dict(row) for row in (fetched.get("rows") or [])]
+        served_from_cache = bool(fetched.get("served_from_cache"))
+        epoch = fetched.get("retrieved_at")
+        # The stamp is the time the ADOPTED payload was actually fetched
+        # over HTTP (a cache hit keeps the entry's creation time, reported
+        # by the client for the exact response it returned). Unknown
+        # provenance stays null — never back-filled with "now" (fail closed
+        # for PR B's staleness gate).
+        retrieved_at = (
+            datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat()
+            if isinstance(epoch, (int, float))
+            else None
+        )
         [normalized] = normalize_estimate_frame(
             [listing],
             {symbol: estimates},
