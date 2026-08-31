@@ -2936,13 +2936,15 @@ def _derive_ranking_scope(audit: Mapping[str, Any], *, deep_dive_count: int) -> 
     universe_total = _integer(_mapping(audit.get("universe")).get("row_count")) or 0
     generation = _mapping(_mapping(audit.get("candidate_pool")).get("generation_audit"))
     bulk = _mapping(generation.get("bulk_estimate_audit"))
-    seed_info = _mapping(generation.get("seed_audit"))
     covered = _integer(bulk.get("covered_symbol_count")) or 0
     mode = _text(generation.get("estimate_acquisition_mode"))
     if mode == "analyst_estimates_bulk" and covered:
-        attempted = covered
+        attempted: int | None = covered
     else:
-        attempted = _integer(seed_info.get("seed_limit_effective")) or 0
+        # Copy discovery's ACTUAL attempted count — never the configured
+        # seed LIMIT, which can exceed a narrow universe and fabricate
+        # >100% coverage. A missing or impossible count fails closed below.
+        attempted = _integer(generation.get("economic_attempt_count"))
     probe_raw = _mapping(generation.get("quality_probe")).get("attempted")
     if isinstance(probe_raw, list):
         probe_count = len(probe_raw)
@@ -2950,9 +2952,16 @@ def _derive_ranking_scope(audit: Mapping[str, Any], *, deep_dive_count: int) -> 
         probe_count = _integer(probe_raw) or 0
     evaluable = _integer(generation.get("economically_evaluable_count")) or 0
     queue_count = _integer(_mapping(audit.get("enrichment")).get("unresolved_count")) or 0
-    if queue_count > 0 or universe_total <= 0 or attempted <= 0:
-        # Fail closed: an unresolved queue, no universe, or zero attempted
-        # names all make the output a diagnostic, not a scoped conclusion.
+    if (
+        queue_count > 0
+        or universe_total <= 0
+        or attempted is None
+        or attempted <= 0
+        or attempted > universe_total
+    ):
+        # Fail closed: an unresolved queue, no universe, a missing attempt
+        # count, zero attempts, or an attempt count exceeding the universe
+        # all make the output a diagnostic, not a scoped conclusion.
         scope = "diagnostic"
     elif mode == "analyst_estimates_bulk" and covered >= universe_total:
         scope = "final_marketwide"
@@ -2965,8 +2974,8 @@ def _derive_ranking_scope(audit: Mapping[str, Any], *, deep_dive_count: int) -> 
     return {
         "ranking_scope": scope,
         "listing_universe_count": universe_total,
-        "economic_attempt_count": attempted,
-        "economic_attempt_coverage_pct": _pct(attempted),
+        "economic_attempt_count": attempted or 0,
+        "economic_attempt_coverage_pct": _pct(attempted or 0),
         "economically_evaluable_count": evaluable,
         "economically_evaluable_coverage_pct": _pct(evaluable),
         "quality_probe_count": probe_count,
@@ -3314,8 +3323,7 @@ def render_markdown(report: Mapping[str, Any], *, language: str = "en") -> str:
         mode = _text(generation.get("estimate_acquisition_mode")) or missing
         bulk = _mapping(generation.get("bulk_estimate_audit"))
         covered = _integer(bulk.get("covered_symbol_count"))
-        seed_info = _mapping(generation.get("seed_audit"))
-        seeds = _integer(seed_info.get("seed_limit_effective"))
+        seeds = _integer(generation.get("economic_attempt_count"))
         if mode == "analyst_estimates_bulk" and covered is not None and universe_total:
             coverage = f"{covered} / {universe_total} ({covered / universe_total * 100.0:.1f}%)"
             status = "complete" if covered >= universe_total else "partial"

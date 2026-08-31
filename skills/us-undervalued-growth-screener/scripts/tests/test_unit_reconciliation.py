@@ -96,6 +96,70 @@ class UnitReconciliationGateTests(unittest.TestCase):
             self.assertNotIn("enrichment_exhausted", row)
 
 
+class UnitContextFailClosedTests(unittest.TestCase):
+    """Round-8 review: an UNKNOWN unit context is unreconciled, never domestic."""
+
+    def test_missing_country_with_cny_currency_is_blocked(self) -> None:
+        row = _base_row()
+        row["country"] = None
+        row["currency"] = "CNY"
+        d = _decide(row)
+        self.assertIn("unit_reconciliation_required", d.get("blocking_review_reasons") or [])
+        self.assertFalse(d.get("selection_eligible"))
+
+    def test_missing_country_with_foreign_isin_is_blocked(self) -> None:
+        row = _base_row()
+        row["country"] = None
+        row["currency"] = None
+        row["isin"] = "KYG123456789"
+        d = _decide(row)
+        self.assertIn("unit_reconciliation_required", d.get("blocking_review_reasons") or [])
+        self.assertFalse(d.get("selection_eligible"))
+
+    def test_adr_flag_is_blocked_even_with_us_country(self) -> None:
+        row = _base_row()
+        row["country"] = "US"
+        row["is_adr"] = True
+        d = _decide(row)
+        self.assertIn("unit_reconciliation_required", d.get("blocking_review_reasons") or [])
+
+    def test_proven_domestic_row_passes_the_gate(self) -> None:
+        row = _base_row()
+        row["country"] = "US"
+        row["currency"] = "USD"
+        row["isin"] = "US1564311082"
+        d = _decide(row)
+        self.assertNotIn("unit_reconciliation_required", d.get("blocking_review_reasons") or [])
+
+    def test_requires_unit_reconciliation_unit_cases(self) -> None:
+        req = SCREEN.requires_unit_reconciliation
+        self.assertTrue(req({}))  # nothing proven -> fail closed
+        self.assertTrue(req({"country": "US", "currency": "CNY"}))
+        self.assertTrue(req({"country": "US", "isin": "KYG8464W1069"}))
+        self.assertTrue(req({"country": "US", "is_adr": True}))
+        self.assertFalse(req({"country": "US"}))
+        self.assertFalse(req({"country": "US", "currency": "USD", "isin": "US1564311082"}))
+        self.assertFalse(req({"country": "CN", "unit_reconciliation_verified": True}))
+
+    def test_normalize_listing_keeps_unit_identity_signals(self) -> None:
+        out = PIPELINE.normalize_listing(
+            {
+                "symbol": "QFIN",
+                "companyName": "Qifu Technology",
+                "price": 8.8,
+                "marketCap": 1_200_000_000,
+                "country": "CN",
+                "currency": "CNY",
+                "isin": "KYG8464W1069",
+                "isAdr": True,
+            },
+            "NASDAQ",
+        )
+        self.assertEqual(out["isin"], "KYG8464W1069")
+        self.assertTrue(out["is_adr"])
+        self.assertTrue(SCREEN.requires_unit_reconciliation(out))
+
+
 class AcceptedDateTimezoneTests(unittest.TestCase):
     def _statements(self, accepted: str) -> list[dict]:
         return [{"period": "FY", "date": "2025-12-31", "acceptedDate": accepted, "epsDiluted": 2.0}]

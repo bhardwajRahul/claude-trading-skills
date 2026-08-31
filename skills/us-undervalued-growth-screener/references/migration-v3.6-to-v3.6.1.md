@@ -77,6 +77,12 @@ Gold, silver, precious/base metals, copper, uranium, coal, metals & mining, and 
 - FMP `acceptedDate` / naive publish stamps are US/Eastern (the SEC acceptance clock), not UTC: a 17:23 ET acceptance read as UTC leaked the filing 4-5 hours early. Both `_verified_annual_actual` and the consensus publish check convert from `America/New_York`; date-only publish stamps count only after the whole publication day (ET) has passed.
 - The scope-less pool-floor waiver was removed (fail closed; see the round-4 section above).
 
+### Fail-closed unit context, actual attempt counts, capital_markets exemption (round-8 review)
+
+- The unit gate is inverted from "block what is proven foreign" to "exempt only what is proven domestic": the shared `requires_unit_reconciliation()` (in `screen_universe`, used by both discovery's exhaustion marker and the screen's blocking gate) demands reconciliation evidence whenever the country is missing or non-US, the currency is non-USD, the ISIN is non-US, or the row is an ADR/ADS. `normalize_listing` now preserves `isin` and `is_adr` so those signals survive into the pipeline — a provider dropping the country field can no longer route a CNY-denominated row through as domestic.
+- Discovery records the ACTUAL attempted count (`economic_attempt_count = len(estimate frame)`) in the generation audit; the evaluator copies it and fails closed to `diagnostic` when the field is missing, zero, or exceeds the universe (a 180 seed LIMIT over a 50-name universe must never display 360% coverage).
+- `capital_markets` (advisory/investment banking) is excluded from the sector-enrichment exhaustion marker: only profiles the screen actually blocks (`SECTOR_PROFILES` + `auto_dealership`) are declared provider-unservable.
+
 ### Honest ranking scope (round-6 review)
 
 - Listing 2,371 names and economically comparing 2,371 names are different claims: a run that attempted estimates for 180 seeds (98 evaluable, 4.1% of the universe) is a **scoped pilot**, not a market ranking, and the remaining ~96% are *unexamined*, not rejected. Every run now carries a tri-state `ranking_scope` — `final_marketwide` (estimate acquisition attempted for every listed symbol, exact counts), `final_scoped` (a bounded, fully processed subset; conclusions bind only to it), or `diagnostic` (unresolved queue) — plus per-stage coverage counts and percentages (`economic_attempt_*`, `economically_evaluable_*`, `quality_probe_*`, `deep_dive_*`) in the run summary and report JSON.

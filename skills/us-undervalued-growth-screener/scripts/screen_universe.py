@@ -81,6 +81,39 @@ CANDIDATE_GENERATION_MODES = {
 ESTIMATE_MODES = CANDIDATE_GENERATION_MODES - {"full_universe_fundamentals"}
 SECTOR_PROFILES = {"bank", "insurance", "reit", "bdc", "mlp", "asset_manager"}
 
+# ISIN prefixes that prove a US-domiciled security.
+_US_ISIN_PREFIXES = ("US",)
+
+
+def requires_unit_reconciliation(row: Mapping[str, Any]) -> bool:
+    """Fail-closed unit-context gate shared by discovery and screening.
+
+    Valuation ratios are trustworthy only when the listing price and the
+    statement/estimate figures are provably in the same currency and share
+    unit. That is the case only for a row PROVEN domestic (country US, no
+    foreign ISIN, not an ADR/ADS, currency USD or unstated). Anything
+    else — a missing country, a non-USD currency, a non-US ISIN, or an
+    ADR/ADS flag — requires explicit ``unit_reconciliation_verified``
+    evidence: an unknown unit context is treated as unreconciled, never as
+    domestic (QFIN passed the old gate whenever the provider dropped the
+    country field).
+    """
+    if row.get("unit_reconciliation_verified") is True:
+        return False
+    if row.get("is_adr") is True:
+        return True
+    country = (_text(row.get("country")) or "").upper()
+    if country != "US":
+        return True
+    currency = (_text(row.get("currency")) or "").upper()
+    if currency and currency != "USD":
+        return True
+    isin = (_text(row.get("isin")) or "").upper()
+    if isin and not isin.startswith(_US_ISIN_PREFIXES):
+        return True
+    return False
+
+
 DEFAULTS: dict[str, Any] = {
     "requested_min_market_cap": DEFAULT_REQUESTED_MIN_MARKET_CAP,
     "requested_max_market_cap": DEFAULT_REQUESTED_MAX_MARKET_CAP,
@@ -412,13 +445,15 @@ def _candidate_decision(
             blocking_review.append("sector_adjusted_leverage_required")
         else:
             leverage = adjusted
-    # Foreign issuers listed as ADS/ADR: a USD listing price against
+    # Unit-context gate (fail closed): a USD listing price against
     # local-currency (or differently ratioed ADS) statements produces
-    # meaningless ratios until unit reconciliation is verified.
-    is_foreign = (_text(row.get("country")) or "US").upper() != "US" or (
+    # meaningless ratios until unit reconciliation is verified — and an
+    # UNKNOWN context (missing country, non-USD currency, non-US ISIN,
+    # ADR/ADS) counts as unreconciled, never as domestic.
+    if requires_unit_reconciliation(row) or (
         "foreign_private_issuer_review" in (row.get("provider_prefilter_flags") or [])
-    )
-    if is_foreign and _bool(row.get("unit_reconciliation_verified")) is not True:
+        and _bool(row.get("unit_reconciliation_verified")) is not True
+    ):
         blocking_review.append("unit_reconciliation_required")
     # Unit-anomaly circuit breakers (any issuer): impossible "cheapness" is a
     # suspected currency/ADS-unit mismatch, never deep value (QFIN: forward

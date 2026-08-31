@@ -26,7 +26,12 @@ from build_provider_prefilter_pool import ALLOWED_LANES, _lane_score, build_pool
 from fmp_client import ApiCallBudgetExceeded, FMPClient
 from normalize_estimates import apply_verified_actual_eps, normalize_symbol
 from screen_universe import DEFAULTS as SCREEN_DEFAULTS
-from screen_universe import _canonical_line, run_layered
+from screen_universe import (
+    SECTOR_PROFILES,
+    _canonical_line,
+    requires_unit_reconciliation,
+    run_layered,
+)
 from skill_version import runtime_metadata
 
 # SEC filing acceptance timestamps (FMP acceptedDate) are US/Eastern wall time.
@@ -329,6 +334,11 @@ def normalize_listing(row: Mapping[str, Any], exchange: str) -> dict[str, Any] |
         "common_stock": is_common_stock(row),
         "currency": _text(row.get("currency")),
         "country": _text(row.get("country")),
+        # Unit-context identity signals must survive normalization: the
+        # fail-closed unit gate needs them, and a dropped ISIN silently
+        # disabled the non-US-ISIN check in earlier versions.
+        "isin": _text(row.get("isin")),
+        "is_adr": row.get("isAdr") is True,
         "sector_profile_type": infer_sector_profile_type(
             _text(row.get("sector")),
             _text(row.get("industry")),
@@ -880,6 +890,11 @@ _SECTOR_METRIC_FIELDS = (
 )
 
 
+# Profiles whose missing sector metrics BLOCK screening (capital_markets is
+# labelled but valued on ordinary multiples, so it is deliberately absent).
+_BLOCKED_SECTOR_PROFILES = frozenset(SECTOR_PROFILES) | {"auto_dealership"}
+
+
 def mark_sector_profile_exhaustion(
     rows: Sequence[Mapping[str, Any]], *, source_id: str
 ) -> list[dict[str, Any]]:
@@ -901,7 +916,7 @@ def mark_sector_profile_exhaustion(
         has_sector_metrics = any(
             _first_number(row, field) is not None for field in _SECTOR_METRIC_FIELDS
         )
-        if profile != "general" and not has_sector_metrics:
+        if profile in _BLOCKED_SECTOR_PROFILES and not has_sector_metrics:
             row.setdefault("enrichment_attempted", True)
             row["enrichment_exhausted"] = True
             row["enrichment_exhaustion_reason"] = (
@@ -938,7 +953,7 @@ def mark_unit_reconciliation_exhaustion(
     output: list[dict[str, Any]] = []
     for raw in rows:
         row = dict(raw)
-        if _is_foreign_private_issuer(row) and row.get("unit_reconciliation_verified") is not True:
+        if requires_unit_reconciliation(row):
             row.setdefault("enrichment_attempted", True)
             row["enrichment_exhausted"] = True
             row["enrichment_exhaustion_reason"] = (
@@ -1804,6 +1819,13 @@ def execute_pipeline(
             "bulk_estimate_audit": bulk_estimate_audit,
             "exact_liquidity_target_count": len(liquidity_targets),
             "quality_probe": quality_probe_audit,
+            # ACTUAL attempted count (len of the estimate frame), never the
+            # configured seed LIMIT: a 180 limit over a 50-name universe must
+            # not fabricate 360% coverage.
+            "economic_attempt_count": len(seed),
+            "economic_attempt_coverage_pct": round(
+                len(seed) / len(enriched_universe) * 100.0 if enriched_universe else 0.0, 6
+            ),
             "economically_evaluable_count": sum(
                 1
                 for row in normalized_estimates

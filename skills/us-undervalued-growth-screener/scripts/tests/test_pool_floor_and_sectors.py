@@ -155,6 +155,7 @@ class SectorExhaustionTests(unittest.TestCase):
             {"symbol": "ABR", "sector_profile_type": "reit"},
             {"symbol": "GEN", "sector_profile_type": "general"},
             {"symbol": "AFO", "sector_profile_type": "reit", "p_to_affo": 9.5},
+            {"symbol": "HLI", "sector_profile_type": "capital_markets"},
         ]
         out = PIPELINE.mark_sector_profile_exhaustion(rows, source_id="fmp-key-metrics-ttm-x")
         by = {r["symbol"]: r for r in out}
@@ -163,6 +164,9 @@ class SectorExhaustionTests(unittest.TestCase):
         self.assertEqual(by["ABR"]["enrichment_source_ids"], ["fmp-key-metrics-ttm-x"])
         self.assertNotIn("enrichment_exhausted", by["GEN"])
         self.assertNotIn("enrichment_exhausted", by["AFO"])  # has a sector metric
+        # Round-8 review: capital_markets is valued on ordinary multiples —
+        # it must never be declared sector-enrichment exhausted.
+        self.assertNotIn("enrichment_exhausted", by["HLI"])
 
     def test_exhausted_reit_resolves_as_unavailable_after_enrichment(self) -> None:
         base = json.loads(

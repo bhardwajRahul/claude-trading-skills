@@ -947,6 +947,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
     def test_high_growth_exception_is_selected(self) -> None:
         row = {
             "symbol": "EXLSX",
+            "country": "US",
             "company_name": "High Growth",
             "exchange": "NASDAQ",
             "is_actively_trading": True,
@@ -976,6 +977,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
     def test_auto_dealer_without_floorplan_adjustment_is_review_required(self) -> None:
         row = {
             "symbol": "GPIX",
+            "country": "US",
             "company_name": "Dealer",
             "exchange": "NYSE",
             "is_actively_trading": True,
@@ -1011,6 +1013,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
             rows.append(
                 {
                     "symbol": f"S{index}",
+                    "country": "US",
                     "exchange": "NASDAQ",
                     "is_actively_trading": True,
                     "is_common_stock": True,
@@ -1040,6 +1043,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
         rows = [
             {
                 "symbol": "MISSB",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -1050,6 +1054,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "MISSA",
+                "country": "US",
                 "exchange": "NYSE",
                 "sector": "Industrials",
                 "is_actively_trading": True,
@@ -1079,6 +1084,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
         rows = [
             {
                 "symbol": "ONLY",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -1107,6 +1113,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
         rows = [
             {
                 "symbol": "EARLY",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -1144,6 +1151,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
         rows = [
             {
                 "symbol": "FAIL",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -1187,6 +1195,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
             rows.append(
                 {
                     "symbol": symbol,
+                    "country": "US",
                     "exchange": "NASDAQ",
                     "sector": "Financial Services",
                     "sector_profile_type": "reit",
@@ -1215,6 +1224,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
     def test_reduced_scope_is_disclosed_and_not_completion_ready(self) -> None:
         row = {
             "symbol": "READY",
+            "country": "US",
             "exchange": "NASDAQ",
             "is_actively_trading": True,
             "is_common_stock": True,
@@ -1250,6 +1260,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
                 rows.append(
                     {
                         "symbol": f"{sector[0]}{index}",
+                        "country": "US",
                         "exchange": "NASDAQ",
                         "sector": sector,
                         "is_actively_trading": True,
@@ -1285,6 +1296,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
         rows = [
             {
                 "symbol": "ALOWV",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Aerospace",
                 "is_actively_trading": True,
@@ -1295,6 +1307,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "BMID",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Banks",
                 "is_actively_trading": True,
@@ -1305,6 +1318,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "ZHIGH",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Zoology",
                 "is_actively_trading": True,
@@ -1333,6 +1347,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
                 json.dumps(
                     {
                         "symbol": "ONLY",
+                        "country": "US",
                         "exchange": "NASDAQ",
                         "is_actively_trading": True,
                         "is_common_stock": True,
@@ -1380,6 +1395,7 @@ class BroadScreenTests(FixtureMixin, unittest.TestCase):
                 json.dumps(
                     {
                         "symbol": "READY",
+                        "country": "US",
                         "exchange": "NASDAQ",
                         "is_actively_trading": True,
                         "is_common_stock": True,
@@ -1504,6 +1520,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             rows.append(
                 {
                     "symbol": f"FAIL{index}",
+                    "country": "US",
                     "exchange": "NASDAQ",
                     "sector": "Technology",
                     "is_actively_trading": True,
@@ -1522,6 +1539,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             rows.append(
                 {
                     "symbol": f"WAIT{index}",
+                    "country": "US",
                     "exchange": "NYSE",
                     "sector": "Industrials",
                     "is_actively_trading": True,
@@ -1550,6 +1568,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
         rows = [
             {
                 "symbol": "MODX",
+                "country": "US",
                 "exchange": "NYSE",
                 "sector": "Industrials",
                 "is_actively_trading": True,
@@ -1565,6 +1584,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "MKSX",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -1593,6 +1613,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
     def test_growth_guidelines_are_not_mechanical_cutoffs(self) -> None:
         row = {
             "symbol": "BFAMX",
+            "country": "US",
             "exchange": "NYSE",
             "sector": "Consumer Defensive",
             "is_actively_trading": True,
@@ -1618,6 +1639,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
         rows = [
             {
                 "symbol": "GARP",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -1633,6 +1655,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "BASE",
+                "country": "US",
                 "exchange": "NYSE",
                 "sector": "Materials",
                 "is_actively_trading": True,
@@ -1654,6 +1677,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
     def test_full_cap_range_without_pagination_evidence_is_not_scope_complete(self) -> None:
         row = {
             "symbol": "READY",
+            "country": "US",
             "exchange": "NASDAQ",
             "is_actively_trading": True,
             "is_common_stock": True,
@@ -1682,6 +1706,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
     def test_unavailable_after_enrichment_requires_reason_and_sources(self) -> None:
         base = {
             "symbol": "MISSING",
+            "country": "US",
             "exchange": "NASDAQ",
             "sector": "Technology",
             "is_actively_trading": True,
@@ -1926,6 +1951,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
         universe = [
             {
                 "symbol": "ACME",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -1936,6 +1962,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "OTHER",
+                "country": "US",
                 "exchange": "NYSE",
                 "sector": "Industrials",
                 "is_actively_trading": True,
@@ -1991,6 +2018,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
         universe = [
             {
                 "symbol": "FAIL",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -2001,6 +2029,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "OTHER",
+                "country": "US",
                 "exchange": "NYSE",
                 "sector": "Industrials",
                 "is_actively_trading": True,
@@ -2082,6 +2111,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             "review_required": [
                 {
                     "symbol": "MODX",
+                    "country": "US",
                     "company_name": "Modine-like Cyclical",
                     "status": "sector_review_required",
                     "review_reasons": ["mid_cycle_normalization_required"],
@@ -2092,6 +2122,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             "screened_out": [
                 {
                     "symbol": "FAILX",
+                    "country": "US",
                     "company_name": "Extreme Valuation",
                     "status": "screened_out",
                     "screen_fail_reasons": ["extreme_forward_valuation"],
@@ -2111,6 +2142,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
         universe = [
             {
                 "symbol": "FAILA",
+                "country": "US",
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "is_actively_trading": True,
@@ -2121,6 +2153,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "UNSEEN",
+                "country": "US",
                 "exchange": "NYSE",
                 "sector": "Industrials",
                 "is_actively_trading": True,
@@ -2153,6 +2186,7 @@ class RegressionV33Tests(FixtureMixin, unittest.TestCase):
     def test_band_audit_must_cover_requested_market_cap_range_without_gaps(self) -> None:
         row = {
             "symbol": "READY",
+            "country": "US",
             "exchange": "NASDAQ",
             "sector": "Technology",
             "is_actively_trading": True,
@@ -2204,6 +2238,7 @@ class RegressionV34Tests(FixtureMixin, unittest.TestCase):
     def valid_discovery_row(self, symbol: str = "VALID") -> dict:
         return {
             "symbol": symbol,
+            "country": "US",
             "exchange": "NASDAQ",
             "sector": "Technology",
             "is_actively_trading": True,
@@ -2374,6 +2409,7 @@ class RegressionV34Tests(FixtureMixin, unittest.TestCase):
         estimates = [
             {
                 "symbol": "VALIDFY1",
+                "country": "US",
                 "date": "2026-12-31",
                 "fiscalYear": "2026",
                 "epsAvg": 2.5,
@@ -2385,6 +2421,7 @@ class RegressionV34Tests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "VALIDFY1",
+                "country": "US",
                 "date": "2027-12-31",
                 "fiscalYear": "2027",
                 "epsAvg": 3.0,
@@ -2396,6 +2433,7 @@ class RegressionV34Tests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "VALIDFY1",
+                "country": "US",
                 "date": "2028-12-31",
                 "fiscalYear": "2028",
                 "epsAvg": 3.6,
@@ -2438,6 +2476,7 @@ class RegressionV34Tests(FixtureMixin, unittest.TestCase):
         estimates = [
             {
                 "symbol": "FRMIRAW",
+                "country": "US",
                 "date": "2028-12-31",
                 "fiscalYear": "2028",
                 "epsAvg": 1.35,
@@ -2449,6 +2488,7 @@ class RegressionV34Tests(FixtureMixin, unittest.TestCase):
             },
             {
                 "symbol": "FRMIRAW",
+                "country": "US",
                 "date": "2030-12-31",
                 "fiscalYear": "2030",
                 "epsAvg": 8.0,
@@ -2752,6 +2792,7 @@ class RegressionV35Tests(FixtureMixin, unittest.TestCase):
             requirements = ["mid_cycle_normalization_required"] if lane == "cycle" else []
             return {
                 "symbol": symbol,
+                "country": "US",
                 "sector": sector,
                 "deep_dive_priority_score": priority,
                 "broad_score": priority,
@@ -2863,6 +2904,7 @@ class RegressionV35Tests(FixtureMixin, unittest.TestCase):
     def test_provider_prefilter_skips_invalid_liquidity_without_poisoning_valid_pool(self) -> None:
         valid = {
             "symbol": "GOOD",
+            "country": "US",
             "price": 25.0,
             "market_cap": 2_000_000_000,
             "average_volume": 500_000,

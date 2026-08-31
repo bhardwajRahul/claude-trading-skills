@@ -101,6 +101,7 @@ def _audit(
         "candidate_pool": {
             "generation_audit": {
                 "estimate_acquisition_mode": mode,
+                "economic_attempt_count": seeds,
                 "economically_evaluable_count": evaluable,
                 "seed_audit": {"seed_limit_effective": seeds},
                 "bulk_estimate_audit": {
@@ -131,6 +132,20 @@ class DeriveRankingScopeTests(unittest.TestCase):
 
     def test_zero_attempts_derive_as_diagnostic(self) -> None:
         info = EVAL._derive_ranking_scope(_audit(seeds=0, evaluable=0), deep_dive_count=0)
+        self.assertEqual(info["ranking_scope"], "diagnostic")
+
+    def test_missing_attempt_count_fails_closed(self) -> None:
+        # Round-8 review: the evaluator must copy discovery's ACTUAL count,
+        # and a missing field is a diagnostic, never a reconstructed limit.
+        audit = _audit()
+        del audit["candidate_pool"]["generation_audit"]["economic_attempt_count"]
+        info = EVAL._derive_ranking_scope(audit, deep_dive_count=3)
+        self.assertEqual(info["ranking_scope"], "diagnostic")
+
+    def test_attempts_exceeding_universe_fail_closed(self) -> None:
+        # The reviewer's reproduction: 50-name universe, seed LIMIT 180 —
+        # 360% coverage must never appear as a scoped conclusion.
+        info = EVAL._derive_ranking_scope(_audit(universe=50, seeds=180), deep_dive_count=3)
         self.assertEqual(info["ranking_scope"], "diagnostic")
 
     def test_bulk_full_coverage_is_marketwide(self) -> None:
