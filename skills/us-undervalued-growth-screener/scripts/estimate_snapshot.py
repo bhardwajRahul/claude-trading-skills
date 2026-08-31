@@ -120,6 +120,37 @@ def load_universe(snapshot_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_verified_universe(snapshot_dir: Path, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Load the frozen universe and verify it against the manifest.
+
+    Refuses — before any API access or shard append — when the manifest
+    schema is unknown, the row count differs, symbols are missing/duplicated,
+    or the canonical SHA-256 no longer matches: a silently swapped
+    ``universe.jsonl`` would otherwise break the freeze guarantee while
+    keeping ``classification_matches_universe`` true.
+    """
+    if int(manifest.get("schema_version") or 0) != SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported snapshot manifest schema_version {manifest.get('schema_version')!r}"
+        )
+    rows = load_universe(snapshot_dir)
+    expected_count = int(manifest.get("universe_count") or -1)
+    if len(rows) != expected_count:
+        raise ValueError(
+            f"universe.jsonl has {len(rows)} rows but the manifest froze {expected_count}"
+        )
+    symbols = [str(row.get("symbol") or "") for row in rows]
+    if "" in symbols or len(set(symbols)) != len(symbols):
+        raise ValueError("universe.jsonl symbols are missing or not unique")
+    sha = _universe_sha256(rows)
+    if sha != manifest.get("universe_sha256"):
+        raise ValueError(
+            "universe.jsonl does not match the frozen universe_sha256 — the snapshot "
+            "universe may have been modified; create a new snapshot instead"
+        )
+    return rows
+
+
 def shard_path(snapshot_dir: Path, shard_index: int) -> Path:
     return snapshot_dir / f"shard-{shard_index}.jsonl"
 
@@ -156,6 +187,14 @@ def classify_symbol(
     forward_pe = normalized.get("forward_pe")
     if isinstance(forward_pe, (int, float)) and 0 < forward_pe < minimum_plausible_forward_pe:
         return "unit_mismatch"
+    # The normalizer NULLS a non-positive FY1 (reason non_positive_fy1_eps)
+    # before it ever reaches fy1_eps, so the raw candidate / reason list is
+    # the only way this bucket is reachable from real pipeline output.
+    reasons = normalized.get("estimate_normalization_reasons") or []
+    raw_candidate = normalized.get("raw_forward_candidate")
+    raw_eps = raw_candidate.get("eps") if isinstance(raw_candidate, Mapping) else None
+    if "non_positive_fy1_eps" in reasons or (isinstance(raw_eps, (int, float)) and raw_eps <= 0):
+        return "negative_eps"
     periods = normalized.get("estimate_periods")
     if not periods:
         return "no_estimates"
@@ -173,20 +212,26 @@ def update_shard(
     shard_index: int,
     *,
     status: str,
-    as_of: datetime,
+    as_of: str,
     calls_used: int,
     classified: Mapping[str, int],
     attempted: int,
     expected: int,
+    fetch_failed: int = 0,
+    oldest_retrieved_at: str | None = None,
+    newest_retrieved_at: str | None = None,
 ) -> dict[str, Any]:
     if status not in {"pending", "partial", "complete"}:
         raise ValueError(f"unknown shard status {status!r}")
     entry = {
         "status": status,
-        "as_of": as_of.astimezone(timezone.utc).isoformat(),
+        "as_of": as_of,
         "attempted": attempted,
         "expected": expected,
         "calls_used": calls_used,
+        "fetch_failed": fetch_failed,
+        "oldest_retrieved_at": oldest_retrieved_at,
+        "newest_retrieved_at": newest_retrieved_at,
         "classified": dict(sorted(classified.items())),
     }
     manifest["shards"][str(shard_index)] = entry

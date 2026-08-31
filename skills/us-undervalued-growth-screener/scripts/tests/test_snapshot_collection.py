@@ -76,7 +76,7 @@ class FakeClient:
         return self._estimates.get(symbol, [])
 
     def diagnostics(self) -> dict:
-        return {"api_calls_made": self.calls, "cache_hits": 0}
+        return {"api_calls_made": self.calls, "cache_hits": 0, "failure_count": 0}
 
 
 def _config() -> dict:
@@ -263,6 +263,189 @@ class CoverageSemanticsSharedTests(unittest.TestCase):
         broken3 = dict(block)
         del broken3["economically_evaluable_count"]
         self.assertTrue(COV.validate_coverage_block(broken3))
+
+
+class OfflineMissClient:
+    """Simulates offline mode with an empty cache: [] without any call/hit/failure."""
+
+    def get_analyst_estimates(self, symbol: str, *, period: str = "annual", limit: int = 6):
+        return []
+
+    def diagnostics(self) -> dict:
+        return {"api_calls_made": 0, "cache_hits": 0, "failure_count": 0}
+
+
+class HttpFailClient:
+    """Simulates HTTP failures: a call is made, a failure is recorded, [] returned."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_analyst_estimates(self, symbol: str, *, period: str = "annual", limit: int = 6):
+        self.calls += 1
+        return []
+
+    def diagnostics(self) -> dict:
+        return {"api_calls_made": self.calls, "cache_hits": 0, "failure_count": self.calls}
+
+
+class ProviderFailureTests(unittest.TestCase):
+    """Round-2 review P0: provider failures must never classify as no_estimates."""
+
+    def _run(self, client, snapshot_dir, resume=False):
+        return PIPELINE.execute_collect_estimates(
+            client,
+            _config(),
+            analysis_as_of=AS_OF,
+            snapshot_dir=snapshot_dir,
+            shard_index=0,
+            shard_count=1,
+            resume=resume,
+        )
+
+    def test_offline_empty_cache_is_fetch_failure_not_no_estimates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(
+                snapshot_dir, [_listing("AAA"), _listing("BBB")], shard_count=1, as_of=AS_OF
+            )
+            result = self._run(OfflineMissClient(), snapshot_dir)
+            self.assertEqual(result.exit_code, 3)
+            self.assertEqual(result.summary["status"], "shard_partial_fetch_failures")
+            self.assertEqual(result.summary["fetch_failed_count"], 2)
+            self.assertEqual(result.summary["shard_classified"], {})
+            status = SNAP.snapshot_status(SNAP.load_manifest(snapshot_dir))
+            self.assertFalse(status["all_shards_complete"])
+            self.assertFalse(status["classification_matches_universe"])
+
+    def test_http_failures_are_fetch_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            result = self._run(HttpFailClient(), snapshot_dir)
+            self.assertEqual(result.exit_code, 3)
+            self.assertEqual(result.summary["fetch_failed_symbols"], ["AAA"])
+            manifest = SNAP.load_manifest(snapshot_dir)
+            self.assertEqual(manifest["shards"]["0"]["fetch_failed"], 1)
+            self.assertEqual(manifest["shards"]["0"]["status"], "partial")
+
+    def test_successful_empty_response_is_still_no_estimates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            result = self._run(FakeClient({"AAA": []}), snapshot_dir)
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.summary["shard_classified"], {"no_estimates": 1})
+
+
+class FrozenUniverseIntegrityTests(unittest.TestCase):
+    """Round-2 review P0: a swapped universe.jsonl must be refused."""
+
+    def test_tampered_universe_is_refused_before_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            tampered = _listing("ZZZ")
+            import json as _json
+
+            (snapshot_dir / SNAP.UNIVERSE_NAME).write_text(
+                _json.dumps(tampered, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            client = FakeClient({"ZZZ": _estimate_rows()})
+            with self.assertRaises(ValueError):
+                PIPELINE.execute_collect_estimates(
+                    client,
+                    _config(),
+                    analysis_as_of=AS_OF,
+                    snapshot_dir=snapshot_dir,
+                    shard_index=0,
+                    shard_count=1,
+                    resume=False,
+                )
+            self.assertEqual(client.calls, 0)  # refused before any API access
+
+    def test_count_mismatch_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(
+                snapshot_dir, [_listing("AAA"), _listing("BBB")], shard_count=1, as_of=AS_OF
+            )
+            content = (snapshot_dir / SNAP.UNIVERSE_NAME).read_text().splitlines()
+            (snapshot_dir / SNAP.UNIVERSE_NAME).write_text(content[0] + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                SNAP.load_verified_universe(snapshot_dir, SNAP.load_manifest(snapshot_dir))
+
+
+class FreshnessStampTests(unittest.TestCase):
+    """Round-2 review P0: zero-collection runs must not refresh shard freshness."""
+
+    def test_zero_collect_resume_preserves_as_of(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            estimates = {"AAA": _estimate_rows()}
+            first = PIPELINE.execute_collect_estimates(
+                FakeClient(estimates),
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            self.assertEqual(first.exit_code, 0)
+            original_as_of = SNAP.load_manifest(snapshot_dir)["shards"]["0"]["as_of"]
+            later = AS_OF.replace(day=31)
+            second = PIPELINE.execute_collect_estimates(
+                FakeClient(estimates),
+                _config(),
+                analysis_as_of=later,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=True,
+            )
+            self.assertEqual(second.summary["collected_this_run"], 0)
+            entry = SNAP.load_manifest(snapshot_dir)["shards"]["0"]
+            self.assertEqual(entry["as_of"], original_as_of)
+            self.assertIsNotNone(entry["oldest_retrieved_at"])
+            self.assertIsNotNone(entry["newest_retrieved_at"])
+
+    def test_rows_carry_actual_retrieval_stamps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("AAA")], shard_count=1, as_of=AS_OF)
+            PIPELINE.execute_collect_estimates(
+                FakeClient({"AAA": _estimate_rows()}),
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            [row] = SNAP.load_shard_rows(snapshot_dir, 0)
+            self.assertIn("snapshot_retrieved_at", row)
+            self.assertFalse(row["snapshot_served_from_cache"])
+
+
+class NegativeEpsIntegrationTests(unittest.TestCase):
+    """Round-2 review P1: negative_eps must be reachable through the real normalizer."""
+
+    def test_negative_consensus_classifies_negative_eps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snap"
+            SNAP.create_snapshot(snapshot_dir, [_listing("NEG")], shard_count=1, as_of=AS_OF)
+            result = PIPELINE.execute_collect_estimates(
+                FakeClient({"NEG": _estimate_rows(fy1=-1.0)}),
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=False,
+            )
+            self.assertEqual(result.summary["shard_classified"], {"negative_eps": 1})
 
 
 if __name__ == "__main__":

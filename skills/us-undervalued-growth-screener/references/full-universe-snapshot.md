@@ -31,11 +31,27 @@ python3 scripts/run_pipeline.py \
   (precedence: excluded > unit_mismatch > no_estimates > negative_eps >
   evaluable; the unit gate is the round-8 fail-closed
   `requires_unit_reconciliation`).
+- **Provider failures are never classified.** The client returns an empty
+  list for HTTP failures, offline cache misses and invalid JSON as well as
+  for genuinely empty consensus; the stage distinguishes them via the
+  client's per-call diagnostics (calls / cache hits / failure count) and
+  records failures as `fetch_failed` — the symbol stays uncollected, the
+  shard stays `partial` (`shard_partial_fetch_failures`, exit 3), and the
+  marketwide invariant cannot be satisfied by outages.
 - Budget exhaustion mid-shard exits with code **3**, records the shard as
   `partial` in the manifest, and is resumable with `--resume`. A shard file
   that already exists without `--resume` is refused.
+- **The frozen universe is re-verified on every load** (manifest schema,
+  row count, symbol uniqueness, canonical SHA-256) before any API access or
+  shard append; a swapped `universe.jsonl` is refused.
+- Every collected row carries `snapshot_retrieved_at` — the ACTUAL fetch
+  time (cache-served rows are stamped from the cache entry's creation time,
+  best-effort) — plus `snapshot_served_from_cache`. Shards aggregate
+  `oldest_retrieved_at` / `newest_retrieved_at`, and a run that collects
+  nothing does NOT refresh the shard's `as_of` freshness stamp.
 - Shard summaries (`shard-<i>-summary.json`) and the manifest carry attempted
-  / expected counts, per-bucket classification, `as_of`, and calls used.
+  / expected / fetch-failed counts, per-bucket classification, `as_of`,
+  retrieval bounds, and calls used.
 
 ## Readiness invariants (enforced before `screen-full-snapshot`, PR B)
 
