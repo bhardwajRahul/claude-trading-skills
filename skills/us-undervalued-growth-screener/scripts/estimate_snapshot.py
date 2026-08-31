@@ -1,0 +1,222 @@
+"""Persistent full-universe estimate snapshot (v3.7 sharded collection).
+
+A snapshot freezes the listing universe at creation time and then accumulates
+per-symbol estimate rows shard by shard across multiple runs/days, within each
+run's API budget. ``screen-full-snapshot`` (a later stage) may only run once
+every shard is complete and every frozen symbol is classified — that is what
+finally justifies ``ranking_scope: final_marketwide``.
+
+Layout inside ``--snapshot-dir``::
+
+    snapshot-manifest.json   # id, frozen universe hash/count, shard states
+    universe.jsonl           # the frozen listing universe (normalized rows)
+    shard-<i>.jsonl          # per-symbol records: listing + estimates + class
+
+Design invariants (round-7 review additions to issue #345):
+
+- The universe is FROZEN by ``snapshot_id``; new listings/delistings go to
+  the next snapshot, never mixed in.
+- Every shard records its own ``as_of``; the spread between the oldest and
+  newest shard is bounded by ``max_shard_age_spread_days`` before screening.
+- Classification counts must sum exactly to the frozen universe count.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+MANIFEST_NAME = "snapshot-manifest.json"
+UNIVERSE_NAME = "universe.jsonl"
+SNAPSHOT_SCHEMA_VERSION = 1
+
+# Per-symbol classification buckets. Precedence when several apply:
+# excluded > unit_mismatch > no_estimates > negative_eps > evaluable.
+# unit_mismatch dominates the estimate-derived buckets because a row whose
+# listing/statement units cannot be reconciled is unusable even WITH
+# estimates (fail closed, round-8 semantics).
+CLASSIFICATIONS = ("evaluable", "no_estimates", "negative_eps", "unit_mismatch", "excluded")
+
+
+def stable_shard(symbol: str, shard_count: int) -> int:
+    """Deterministic shard assignment: the same symbol always lands together."""
+    if shard_count <= 0:
+        raise ValueError("shard_count must be positive")
+    digest = hashlib.sha256(symbol.strip().upper().encode("utf-8")).hexdigest()
+    return int(digest, 16) % shard_count
+
+
+def _universe_sha256(rows: Sequence[Mapping[str, Any]]) -> str:
+    hasher = hashlib.sha256()
+    for row in rows:
+        hasher.update(
+            json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        hasher.update(b"\n")
+    return hasher.hexdigest()
+
+
+def create_snapshot(
+    snapshot_dir: Path,
+    universe_rows: Sequence[Mapping[str, Any]],
+    *,
+    shard_count: int,
+    as_of: datetime,
+) -> dict[str, Any]:
+    """Freeze the universe and initialize an empty manifest."""
+    if shard_count <= 0:
+        raise ValueError("shard_count must be positive")
+    if not universe_rows:
+        raise ValueError("cannot freeze an empty universe")
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    if (snapshot_dir / MANIFEST_NAME).exists():
+        raise ValueError(f"snapshot already exists at {snapshot_dir}")
+    ordered = sorted(universe_rows, key=lambda row: str(row.get("symbol") or ""))
+    with (snapshot_dir / UNIVERSE_NAME).open("w", encoding="utf-8") as handle:
+        for row in ordered:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    sha = _universe_sha256(ordered)
+    manifest = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "snapshot_id": (
+            f"snap-{as_of.astimezone(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{sha[:12]}"
+        ),
+        "created_at": as_of.astimezone(timezone.utc).isoformat(),
+        "universe_sha256": sha,
+        "universe_count": len(ordered),
+        "shard_count": shard_count,
+        "shards": {
+            str(index): {"status": "pending", "attempted": 0, "classified": {}}
+            for index in range(shard_count)
+        },
+    }
+    write_manifest(snapshot_dir, manifest)
+    return manifest
+
+
+def load_manifest(snapshot_dir: Path) -> dict[str, Any]:
+    return json.loads((snapshot_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+
+
+def write_manifest(snapshot_dir: Path, manifest: Mapping[str, Any]) -> None:
+    path = snapshot_dir / MANIFEST_NAME
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_universe(snapshot_dir: Path) -> list[dict[str, Any]]:
+    rows = [
+        json.loads(line)
+        for line in (snapshot_dir / UNIVERSE_NAME).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return rows
+
+
+def shard_path(snapshot_dir: Path, shard_index: int) -> Path:
+    return snapshot_dir / f"shard-{shard_index}.jsonl"
+
+
+def load_shard_rows(snapshot_dir: Path, shard_index: int) -> list[dict[str, Any]]:
+    path = shard_path(snapshot_dir, shard_index)
+    if not path.exists():
+        return []
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+
+
+def append_shard_rows(
+    snapshot_dir: Path, shard_index: int, rows: Sequence[Mapping[str, Any]]
+) -> None:
+    with shard_path(snapshot_dir, shard_index).open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def classify_symbol(
+    listing: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+    *,
+    requires_unit_reconciliation: Any,
+    minimum_plausible_forward_pe: float = 2.0,
+) -> str:
+    """Classify one frozen-universe symbol after an estimate-acquisition attempt."""
+    if listing.get("is_actively_trading") is False or listing.get("is_common_stock") is False:
+        return "excluded"
+    if requires_unit_reconciliation(listing):
+        return "unit_mismatch"
+    forward_pe = normalized.get("forward_pe")
+    if isinstance(forward_pe, (int, float)) and 0 < forward_pe < minimum_plausible_forward_pe:
+        return "unit_mismatch"
+    periods = normalized.get("estimate_periods")
+    if not periods:
+        return "no_estimates"
+    fy1 = normalized.get("fy1_eps")
+    if isinstance(fy1, (int, float)) and fy1 <= 0:
+        return "negative_eps"
+    if fy1 is None:
+        return "no_estimates"
+    return "evaluable"
+
+
+def update_shard(
+    snapshot_dir: Path,
+    manifest: dict[str, Any],
+    shard_index: int,
+    *,
+    status: str,
+    as_of: datetime,
+    calls_used: int,
+    classified: Mapping[str, int],
+    attempted: int,
+    expected: int,
+) -> dict[str, Any]:
+    if status not in {"pending", "partial", "complete"}:
+        raise ValueError(f"unknown shard status {status!r}")
+    entry = {
+        "status": status,
+        "as_of": as_of.astimezone(timezone.utc).isoformat(),
+        "attempted": attempted,
+        "expected": expected,
+        "calls_used": calls_used,
+        "classified": dict(sorted(classified.items())),
+    }
+    manifest["shards"][str(shard_index)] = entry
+    write_manifest(snapshot_dir, manifest)
+    return manifest
+
+
+def snapshot_status(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Aggregate readiness: complete shards, totals, and the exact-count invariant."""
+    shards = manifest.get("shards") or {}
+    totals: dict[str, int] = {name: 0 for name in CLASSIFICATIONS}
+    complete = 0
+    attempted_total = 0
+    for entry in shards.values():
+        if entry.get("status") == "complete":
+            complete += 1
+        attempted_total += int(entry.get("attempted") or 0)
+        for name, count in (entry.get("classified") or {}).items():
+            totals[name] = totals.get(name, 0) + int(count or 0)
+    universe_count = int(manifest.get("universe_count") or 0)
+    classified_total = sum(totals.values())
+    return {
+        "snapshot_id": manifest.get("snapshot_id"),
+        "shard_count": int(manifest.get("shard_count") or 0),
+        "complete_shards": complete,
+        "all_shards_complete": complete == int(manifest.get("shard_count") or 0),
+        "attempted_total": attempted_total,
+        "classified_totals": totals,
+        "classified_total": classified_total,
+        "universe_count": universe_count,
+        # The round-7 invariant: every frozen symbol is classified, exactly.
+        "classification_matches_universe": classified_total == universe_count,
+    }
