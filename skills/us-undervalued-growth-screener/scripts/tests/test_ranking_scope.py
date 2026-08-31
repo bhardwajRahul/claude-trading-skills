@@ -49,6 +49,28 @@ class ClassifyRankingScopeTests(unittest.TestCase):
             "final_marketwide",
         )
 
+    def test_zero_attempts_fail_closed_to_diagnostic(self) -> None:
+        # Round-7 review: a run that attempted nothing proved nothing about
+        # any subset — never final_scoped.
+        self.assertEqual(
+            PIPELINE.classify_ranking_scope(
+                economic_attempt_count=0,
+                listing_universe_count=2371,
+                economic_scope_complete=False,
+                unresolved_queue_count=0,
+            ),
+            "diagnostic",
+        )
+        self.assertEqual(
+            PIPELINE.classify_ranking_scope(
+                economic_attempt_count=180,
+                listing_universe_count=0,
+                economic_scope_complete=False,
+                unresolved_queue_count=0,
+            ),
+            "diagnostic",
+        )
+
     def test_full_attempt_without_scope_completeness_stays_scoped(self) -> None:
         # Attempt counts alone are not enough: the exact-count economic
         # completeness verdict must agree.
@@ -71,6 +93,7 @@ def _audit(
     mode: str = "per_symbol_fallback",
     unresolved: int = 0,
     probe: int = 35,
+    evaluable: int = 98,
 ) -> dict:
     return {
         "universe": {"row_count": universe},
@@ -78,6 +101,7 @@ def _audit(
         "candidate_pool": {
             "generation_audit": {
                 "estimate_acquisition_mode": mode,
+                "economically_evaluable_count": evaluable,
                 "seed_audit": {"seed_limit_effective": seeds},
                 "bulk_estimate_audit": {
                     "covered_symbol_count": covered,
@@ -95,12 +119,18 @@ class DeriveRankingScopeTests(unittest.TestCase):
         self.assertEqual(info["ranking_scope"], "final_scoped")
         self.assertEqual(info["economic_attempt_count"], 180)
         self.assertAlmostEqual(info["economic_attempt_coverage_pct"], 7.591734, places=4)
+        self.assertEqual(info["economically_evaluable_count"], 98)
+        self.assertAlmostEqual(info["economically_evaluable_coverage_pct"], 4.133277, places=4)
         self.assertEqual(info["quality_probe_count"], 35)
         self.assertEqual(info["deep_dive_count"], 3)
         self.assertAlmostEqual(info["deep_dive_coverage_pct"], 0.126529, places=4)
 
     def test_unresolved_queue_marks_diagnostic(self) -> None:
         info = EVAL._derive_ranking_scope(_audit(unresolved=4), deep_dive_count=0)
+        self.assertEqual(info["ranking_scope"], "diagnostic")
+
+    def test_zero_attempts_derive_as_diagnostic(self) -> None:
+        info = EVAL._derive_ranking_scope(_audit(seeds=0, evaluable=0), deep_dive_count=0)
         self.assertEqual(info["ranking_scope"], "diagnostic")
 
     def test_bulk_full_coverage_is_marketwide(self) -> None:

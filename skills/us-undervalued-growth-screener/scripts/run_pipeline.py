@@ -370,11 +370,12 @@ def classify_ranking_scope(
     """
     if unresolved_queue_count > 0:
         return "diagnostic"
-    if (
-        economic_scope_complete
-        and listing_universe_count > 0
-        and economic_attempt_count >= listing_universe_count
-    ):
+    # Fail closed: a run that attempted nothing (or has no universe) proved
+    # nothing about any subset either — that is a diagnostic, not a scoped
+    # conclusion.
+    if listing_universe_count <= 0 or economic_attempt_count <= 0:
+        return "diagnostic"
+    if economic_scope_complete and economic_attempt_count >= listing_universe_count:
         return "final_marketwide"
     return "final_scoped"
 
@@ -1803,6 +1804,25 @@ def execute_pipeline(
             "bulk_estimate_audit": bulk_estimate_audit,
             "exact_liquidity_target_count": len(liquidity_targets),
             "quality_probe": quality_probe_audit,
+            "economically_evaluable_count": sum(
+                1
+                for row in normalized_estimates
+                if str(row.get("estimate_normalization_status") or "") == "valid"
+            ),
+            "economically_evaluable_coverage_pct": round(
+                (
+                    sum(
+                        1
+                        for row in normalized_estimates
+                        if str(row.get("estimate_normalization_status") or "") == "valid"
+                    )
+                    / len(enriched_universe)
+                    * 100.0
+                    if enriched_universe
+                    else 0.0
+                ),
+                6,
+            ),
             "listing_provider_exhausted": True,
             "estimate_seed_exhausted": True,
             "economic_candidate_universe_exhausted": economic_scope_complete(

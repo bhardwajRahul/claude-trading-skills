@@ -2948,10 +2948,13 @@ def _derive_ranking_scope(audit: Mapping[str, Any], *, deep_dive_count: int) -> 
         probe_count = len(probe_raw)
     else:
         probe_count = _integer(probe_raw) or 0
+    evaluable = _integer(generation.get("economically_evaluable_count")) or 0
     queue_count = _integer(_mapping(audit.get("enrichment")).get("unresolved_count")) or 0
-    if queue_count > 0:
+    if queue_count > 0 or universe_total <= 0 or attempted <= 0:
+        # Fail closed: an unresolved queue, no universe, or zero attempted
+        # names all make the output a diagnostic, not a scoped conclusion.
         scope = "diagnostic"
-    elif mode == "analyst_estimates_bulk" and universe_total > 0 and covered >= universe_total:
+    elif mode == "analyst_estimates_bulk" and covered >= universe_total:
         scope = "final_marketwide"
     else:
         scope = "final_scoped"
@@ -2964,6 +2967,8 @@ def _derive_ranking_scope(audit: Mapping[str, Any], *, deep_dive_count: int) -> 
         "listing_universe_count": universe_total,
         "economic_attempt_count": attempted,
         "economic_attempt_coverage_pct": _pct(attempted),
+        "economically_evaluable_count": evaluable,
+        "economically_evaluable_coverage_pct": _pct(evaluable),
         "quality_probe_count": probe_count,
         "quality_probe_coverage_pct": _pct(probe_count),
         "deep_dive_count": deep_dive_count,
@@ -3220,6 +3225,10 @@ def render_markdown(report: Mapping[str, Any], *, language: str = "en") -> str:
     if ranking_scope and ranking_scope != "final_marketwide":
         attempt_pct = coverage.get("economic_attempt_coverage_pct")
         attempt_pct_text = f"{float(attempt_pct):.2f}%" if attempt_pct is not None else missing
+        evaluable_pct = coverage.get("economically_evaluable_coverage_pct")
+        evaluable_pct_text = (
+            f"{float(evaluable_pct):.2f}%" if evaluable_pct is not None else missing
+        )
         lines.append(
             f"- **{_label(language, 'Ranking scope', 'ランキング範囲')}:** {ranking_scope} — "
             + _label(
@@ -3227,13 +3236,13 @@ def render_markdown(report: Mapping[str, Any], *, language: str = "en") -> str:
                 (
                     f"conclusions bind ONLY to the {coverage.get('economic_attempt_count', '?')} names whose estimate "
                     f"acquisition was attempted ({attempt_pct_text} of "
-                    f"{coverage.get('listing_universe_count', '?')} listed; quality probe {coverage.get('quality_probe_count', '?')}, "
+                    f"{coverage.get('listing_universe_count', '?')} listed; economically evaluable {coverage.get('economically_evaluable_count', '?')} = {evaluable_pct_text}; quality probe {coverage.get('quality_probe_count', '?')}, "
                     f"deep dive {coverage.get('deep_dive_count', '?')}). This is NOT a market-wide ranking."
                 ),
                 (
                     f"結論は予想取得を試行した{coverage.get('economic_attempt_count', '?')}銘柄"
                     f"（上場{coverage.get('listing_universe_count', '?')}銘柄の{attempt_pct_text}、"
-                    f"品質プローブ{coverage.get('quality_probe_count', '?')}銘柄、詳細分析{coverage.get('deep_dive_count', '?')}銘柄）"
+                    f"評価可能{coverage.get('economically_evaluable_count', '?')}銘柄・{evaluable_pct_text}、品質プローブ{coverage.get('quality_probe_count', '?')}銘柄、詳細分析{coverage.get('deep_dive_count', '?')}銘柄）"
                     "に限定され、市場全体ランキングではありません。"
                 ),
             )
