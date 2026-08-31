@@ -2057,7 +2057,9 @@ def _analyst_estimates_cache_created_at(
         with sqlite3.connect(str(path)) as connection:
             placeholders = ",".join("?" for _ in keys)
             row = connection.execute(
-                f"SELECT MAX(created_at) FROM responses WHERE cache_key IN ({placeholders})",
+                # The interpolated fragment is only "?,?,..." bind markers;
+                # every value goes through sqlite parameter binding.
+                f"SELECT MAX(created_at) FROM responses WHERE cache_key IN ({placeholders})",  # nosec B608
                 keys,
             ).fetchone()
         return float(row[0]) if row and row[0] is not None else None
