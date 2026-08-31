@@ -115,6 +115,7 @@ Claude Trading Skillsの全スキルをカテゴリ別に紹介します。各�
 | `uptrend-analyzer` | `workflow_step` | — |
 | `us-market-bubble-detector` | `standalone` | Produces an independent market bubble-risk assessment on demand. |
 | `us-stock-analysis` | `standalone` | Produces a self-contained research report for a requested US equity. |
+| `us-undervalued-growth-screener` | `standalone` | Executes an end-to-end US GARP screen from a minimal request. In Claude Code it runs a local direct-FMP pipeline that keeps bulk payloads out of model context, then completes selected SEC/IR underwriting and publishes only a scope-correct audited result. |
 | `value-dividend-screener` | `workflow_step` | — |
 | `vcp-screener` | `workflow_step` | — |
 | `weekly-performance-digest` | `standalone` | Generates a standalone weekly digest from supplied closed-trade records. |
@@ -132,6 +133,7 @@ Claude Trading Skillsの全スキルをカテゴリ別に紹介します。各�
 | **[Stockbee Exhaustion Hammer Screener]({{ '/ja/skills/stockbee-exhaustion-hammer-screener/' | relative_url }})** | Stockbee型の売り枯れハンマー候補をスクリーニング。流動性、直前モメンタム、押し目の深さ、undercut/reclaim、長い下ヒゲ、終値位置、ストップまでのリスクを評価する候補生成専用スキル | <span class="badge badge-api">FMP必須</span> <span class="badge badge-optional">ローカルJSON任意</span> |
 | **FinViz Screener** | 自然言語（日本語/英語）でFinVizスクリーニング条件を構築。500以上のフィルターコードに対応し、Chromeで結果を表示。**テーマクロス検索**（30以上のテーマ × 268サブテーマ）で「AI × 物流」「データセンター × 電力」等のナラティブベース検索が可能 | <span class="badge badge-free">API不要</span> <span class="badge badge-optional">FINVIZ任意</span> |
 | **Value Dividend Screener** | 高配当バリュー株をスクリーニング。P/E、P/B、配当利回り、3年成長トレンドで多段階フィルタリング | <span class="badge badge-api">FMP必須</span> <span class="badge badge-optional">FINVIZ任意</span> |
+| **[US Undervalued Growth Screener]({{ '/ja/skills/us-undervalued-growth-screener/' | relative_url }})** | Claude Code向け米国中小型GARPスクリーナー。FMP直接取得パイプラインとローカルキャッシュ、FY1予想正規化、流動性検証、フォワード同一基準バリュエーション、SBC調整FCF、公開前監査、自己完結型エビデンスバンドル | <span class="badge badge-optional">FMP推奨</span> |
 | **Dividend Growth Pullback Screener** | 年間配当成長12%以上の高品質配当成長株で、RSI 40以下のプルバック中の銘柄を検出 | <span class="badge badge-api">FMP必須</span> <span class="badge badge-optional">FINVIZ任意</span> |
 | **Earnings Trade Analyzer** | 直近決算銘柄を5要素加重スコアリング（ギャップ、トレンド、出来高、MA200、MA50）でA-Dグレード評価 | <span class="badge badge-api">FMP必須</span> |
 | **PEAD Screener** | 決算ギャップアップ銘柄のPost-Earnings Announcement Drift パターンを週足分析。MONITORING→SIGNAL_READY→BREAKOUTのステージ管理 | <span class="badge badge-api">FMP必須</span> |
@@ -253,6 +255,7 @@ Claude Trading Skillsの全スキルをカテゴリ別に紹介します。各�
 
 ### 配当収入がほしい
 
+- **[US Undervalued Growth Screener]({{ '/ja/skills/us-undervalued-growth-screener/' | relative_url }})** - 米国中小型株の監査付きGARPスクリーニング
 - **Value Dividend Screener** - 高配当バリュー株をスクリーニング
 - **Dividend Growth Pullback Screener** - 増配株のプルバック買い機会を検出
 - **Kanchi Dividend SOP** - かんち式5ステップで体系的に配当株を選定
@@ -298,6 +301,7 @@ Claude Trading Skillsの全スキルをカテゴリ別に紹介します。各�
 | VCP Screener | 必須 | - | - |
 | FinViz Screener | - | 任意 | - |
 | Value Dividend Screener | 必須 | 推奨 | - |
+| US Undervalued Growth Screener | 推奨 | - | - |
 | Dividend Growth Pullback Screener | 必須 | 推奨 | - |
 | Earnings Trade Analyzer | 必須 | - | - |
 | PEAD Screener | 必須 | - | - |

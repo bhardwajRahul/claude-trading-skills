@@ -2312,3 +2312,81 @@ skills:
   - weekly_performance_digest
   - performance_pattern_analysis
   workflows: []
+- id: us-undervalued-growth-screener
+  display_name: US Undervalued Growth Screener
+  category: core-portfolio
+  status: beta
+  verification:
+    instruction_contract: passed
+    unit_tests: passed
+    workflow_contract: not_applicable
+    end_to_end_replay: not_verified
+    data_provenance: not_verified
+    financial_logic_review: passed
+    empirical_validation: not_applicable
+    security_review: passed
+  operational_role:
+    type: standalone
+    rationale: >-
+      Executes an end-to-end US GARP screen from a minimal request. In Claude
+      Code it runs a local direct-FMP pipeline that keeps bulk payloads out of
+      model context, then completes selected SEC/IR underwriting and publishes
+      only a scope-correct audited result.
+  summary: >-
+    Screen and rank US-listed small- and mid-cap undervalued-growth stocks with
+    a generated stable-first FMP client, persistent SQLite cache, adaptive
+    listing enumeration, FY1 estimate normalization, verified 20-day liquidity,
+    deterministic four-lane discovery, forward same-basis valuation, standard
+    and SBC-adjusted FCF, dilution, peer, cycle and LOE controls, strict final
+    evaluation, prepublication audit, and a self-contained evidence bundle.
+  timeframe: weekly
+  difficulty: advanced
+  integrations:
+  - id: fmp
+    type: market_data
+    requirement: recommended
+    note: >-
+      Claude Code-native direct REST path using FMP_API_KEY. Bulk responses are
+      cached and written to local artifacts; only compact screening results are
+      returned to the model. Plan-gated bulk endpoints use bounded per-symbol
+      fallbacks.
+  - id: alternate_market_data
+    type: market_data
+    requirement: optional
+    note: Reputable alternative screener or estimates source for bounded discovery.
+  - id: sec_edgar
+    type: web
+    requirement: required
+    note: Primary filings for statements, shares, SBC, debt, cash flow, and corporate actions.
+  - id: company_ir
+    type: web
+    requirement: required
+    note: Earnings, guidance, presentations, prepared remarks, lifecycle/LOE, and Investor Day evidence.
+  - id: official_macro
+    type: web
+    requirement: required
+    note: Current rates, Treasury yields, GDP, inflation, and market context.
+  - id: local_calculation
+    type: calculation
+    requirement: not_required
+    note: >-
+      Python scripts collect and cache FMP data, normalize discovery inputs,
+      build audits, validate schema-3/contract-3.5 evidence, calculate scenarios,
+      checkpoint runs, render reports, and create the audit bundle.
+  inputs:
+  - minimal_screening_request
+  - fmp_api_key_or_equivalent_market_data
+  - current_sec_ir_and_macro_sources
+  outputs:
+  - compact_discovery_summary
+  - listing_universe_audit
+  - bounded_candidate_pool_and_enrichment_audit
+  - selected_candidate_evidence_packets
+  - checkpointed_run_state
+  - undervalued_growth_candidates
+  - forward_valuation_and_stress_scenarios
+  - conditional_and_review_required_queue
+  - screened_out_and_exclusion_logs
+  - final_research_report_json_and_markdown
+  - self_contained_audit_bundle
+  workflows: []
