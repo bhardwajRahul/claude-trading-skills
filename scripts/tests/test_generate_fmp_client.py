@@ -21,12 +21,14 @@ GENERATED_SKILLS = {
     "canslim-screener",
     "macro-regime-detector",
     "market-top-detector",
+    "us-undervalued-growth-screener",
 }
 NO_COMPAT_SKILLS = {
     "ftd-detector",
     "canslim-screener",
     "macro-regime-detector",
     "market-top-detector",
+    "us-undervalued-growth-screener",
 }
 
 
