@@ -58,15 +58,54 @@ def _finite_number(value: Any) -> bool:
     return number == number and number not in (float("inf"), float("-inf"))
 
 
+# Exactly the estimate-value fields the normalizer consumes (its _pick key
+# lists, lowercased). Substring matching is NOT allowed here: numAnalystsEps
+# contains "eps" but is a count, never an estimate value.
+_ESTIMATE_VALUE_KEYS = frozenset(
+    {
+        "epsavg",
+        "eps_avg",
+        "eps",
+        "estimated_eps",
+        "epslow",
+        "eps_low",
+        "epshigh",
+        "eps_high",
+        "revenueavg",
+        "revenue_avg",
+        "revenue",
+        "estimated_revenue",
+    }
+)
+
+
+def _parseable_estimate_date(value: Any) -> bool:
+    """Full-string ISO parse, the same rule the normalizer applies.
+
+    Truncating to ten characters let ``2026-12-31garbage`` through; the
+    WHOLE string must parse.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
 def _valid_estimates_payload(payload: Any) -> bool:
     """Schema gate for analyst-estimates payloads (pre-cache AND on cache read).
 
     A genuinely empty list is valid (no consensus). Anything else must be a
-    list of mappings that are not provider error objects and that carry a
-    PARSEABLE date plus at least one eps/revenue field holding a FINITE
-    number — ``[{"Error Message": ...}]`` is an outage, and
-    ``[{"date": "not-a-date", "epsAvg": null}]`` is unusable noise; neither
-    may complete a symbol as "no estimates".
+    list of mappings that are not provider error objects, whose date parses
+    IN FULL under the normalizer's rule, and that hold a FINITE number in at
+    least one field the normalizer actually consumes —
+    ``[{"Error Message": ...}]`` is an outage,
+    ``[{"date": "2026-12-31garbage", ...}]`` and rows whose only "value" is
+    an analyst count are unusable noise; none may complete a symbol as
+    "no estimates".
     """
     if payload == []:
         return True
@@ -75,14 +114,10 @@ def _valid_estimates_payload(payload: Any) -> bool:
     for row in payload:
         if not isinstance(row, dict) or _is_provider_error_payload(row):
             return False
-        date_text = str(row.get("date") or "")[:10]
-        try:
-            time.strptime(date_text, "%Y-%m-%d")
-        except ValueError:
+        if not _parseable_estimate_date(row.get("date")):
             return False
         has_finite_estimate = any(
-            ("eps" in str(key).strip().lower() or "revenue" in str(key).strip().lower())
-            and _finite_number(value)
+            str(key).strip().lower() in _ESTIMATE_VALUE_KEYS and _finite_number(value)
             for key, value in row.items()
         )
         if not has_finite_estimate:

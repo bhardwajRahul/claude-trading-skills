@@ -558,6 +558,10 @@ class Http200ErrorPayloadTests(unittest.TestCase):
         for payload in (
             [{"date": "not-a-date", "epsAvg": None}],
             [{"date": "2026-12-31", "epsAvg": None, "revenueAvg": None}],
+            # round-6: truncation let a garbage suffix through
+            [{"date": "2026-12-31garbage", "epsAvg": 2.0}],
+            # round-6: an analyst COUNT is not an estimate value
+            [{"date": "2026-12-31", "epsAvg": None, "revenueAvg": None, "numAnalystsEps": 4}],
         ):
             with tempfile.TemporaryDirectory() as tmp:
                 client = self._client(
@@ -824,6 +828,44 @@ class SnapshotVerificationTests(unittest.TestCase):
             verdict = self._verify(snapshot_dir)
             self.assertFalse(verdict["ready_for_screening"])
             self.assertTrue(any("duplicate symbol" in p for p in verdict["problems"]))
+
+    def test_future_data_blocks_historical_screening(self) -> None:
+        # Round-6 review P0: a 2026-collected snapshot must never be "ready"
+        # for a 2020 screening_as_of — that is look-ahead.
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = self._build_clean(tmp)
+            verdict = self._verify(
+                snapshot_dir,
+                screening_as_of=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                max_staleness_days=36500.0,
+            )
+            self.assertTrue(verdict["contents_verified"])
+            self.assertFalse(verdict["no_future_retrievals"])
+            self.assertFalse(verdict["ready_for_screening"])
+
+    def test_missing_shard_sha_is_detected(self) -> None:
+        # Round-6 review P1: an unpinned shard (pre-SHA collection) must not
+        # verify; a zero-collect --resume backfills the SHA.
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = self._build_clean(tmp)
+            manifest = SNAP.load_manifest(snapshot_dir)
+            del manifest["shards"]["0"]["shard_sha256"]
+            SNAP.write_manifest(snapshot_dir, manifest)
+            verdict = self._verify(snapshot_dir)
+            self.assertFalse(verdict["ready_for_screening"])
+            self.assertTrue(any("shard_sha256" in p for p in verdict["problems"]))
+            resumed = PIPELINE.execute_collect_estimates(
+                FakeClient({}),
+                _config(),
+                analysis_as_of=AS_OF,
+                snapshot_dir=snapshot_dir,
+                shard_index=0,
+                shard_count=1,
+                resume=True,
+            )
+            self.assertEqual(resumed.summary["collected_this_run"], 0)
+            verdict = self._verify(snapshot_dir)
+            self.assertTrue(verdict["ready_for_screening"], verdict["problems"])
 
     def test_stale_snapshot_is_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

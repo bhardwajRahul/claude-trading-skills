@@ -321,6 +321,7 @@ def verify_snapshot(
     *,
     screening_as_of: datetime,
     max_staleness_days: float,
+    clock_skew_seconds: float = 300.0,
 ) -> dict[str, Any]:
     """Deep readiness verification against the ACTUAL snapshot contents.
 
@@ -336,9 +337,10 @@ def verify_snapshot(
       symbols covers the frozen universe EXACTLY;
     - every classification is an allowed value, and per-shard counts match
       the manifest;
-    - staleness measured from the ACTUAL oldest retrieval stamp against
-      ``screening_as_of - max_staleness_days`` (never the operator-supplied
-      collection ``as_of``).
+    - retrieval stamps re-aggregated from the ROWS themselves and bounded on
+      BOTH sides: ``screening_as_of - max_staleness_days <= oldest`` and
+      ``newest <= screening_as_of + clock_skew_seconds`` — an historical
+      ``screening_as_of`` must never see data fetched after it (look-ahead).
 
     ``ready_for_screening`` is true ONLY when all of the above hold and the
     manifest-level ``collection_ready`` aggregation agrees.
@@ -355,6 +357,8 @@ def verify_snapshot(
     expected_symbols = {str(row.get("symbol") or "") for row in universe}
     shard_count = int(manifest.get("shard_count") or 0)
     seen: dict[str, int] = {}
+    row_stamps: list[datetime] = []
+    unknown_stamp_rows = 0
     for index in range(shard_count):
         entry = (manifest.get("shards") or {}).get(str(index)) or {}
         path = shard_path(snapshot_dir, index)
@@ -364,7 +368,12 @@ def verify_snapshot(
             continue
         recorded_sha = entry.get("shard_sha256")
         actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
-        if isinstance(recorded_sha, str) and recorded_sha and recorded_sha != actual_sha:
+        if not (isinstance(recorded_sha, str) and recorded_sha):
+            # A shard collected before SHA recording existed must be
+            # backfilled (a zero-collect --resume re-records it) or
+            # re-collected; readiness never accepts an unpinned shard.
+            problems.append(f"shard {index}: manifest lacks shard_sha256")
+        elif recorded_sha != actual_sha:
             problems.append(f"shard {index}: file SHA-256 does not match the manifest")
         recount: dict[str, int] = {}
         for row in load_shard_rows(snapshot_dir, index):
@@ -384,6 +393,18 @@ def verify_snapshot(
             if name not in CLASSIFICATIONS:
                 problems.append(f"shard {index}: {symbol} has classification {name!r}")
             recount[name] = recount.get(name, 0) + 1
+            stamp = row.get("snapshot_retrieved_at")
+            if isinstance(stamp, str) and stamp:
+                try:
+                    stamp_dt = datetime.fromisoformat(stamp)
+                except ValueError:
+                    problems.append(f"shard {index}: {symbol} has unparsable snapshot_retrieved_at")
+                else:
+                    if stamp_dt.tzinfo is None:
+                        stamp_dt = stamp_dt.replace(tzinfo=timezone.utc)
+                    row_stamps.append(stamp_dt)
+            else:
+                unknown_stamp_rows += 1
         recorded = {key: int(value or 0) for key, value in (entry.get("classified") or {}).items()}
         if recorded != recount:
             problems.append(f"shard {index}: manifest classification counts do not match the file")
@@ -392,25 +413,38 @@ def verify_snapshot(
         problems.append(
             f"{len(missing)} frozen-universe symbols never collected (e.g. {sorted(missing)[:5]})"
         )
+    if unknown_stamp_rows:
+        problems.append(f"{unknown_stamp_rows} rows carry no retrieval stamp (unknown provenance)")
     status = snapshot_status(manifest)
-    oldest = status.get("oldest_retrieved_at")
-    staleness_ok = False
-    if isinstance(oldest, str) and oldest:
-        try:
-            oldest_dt = datetime.fromisoformat(oldest)
-            if oldest_dt.tzinfo is None:
-                oldest_dt = oldest_dt.replace(tzinfo=timezone.utc)
-            staleness_ok = oldest_dt >= screening_as_of - timedelta(days=float(max_staleness_days))
-        except ValueError:
-            problems.append(f"unparsable oldest_retrieved_at {oldest!r}")
+    # Freshness is judged from the stamps RE-AGGREGATED out of the shard
+    # rows themselves (the manifest's own bounds are informational only),
+    # and bounded on BOTH sides: old data is stale, and data fetched after
+    # screening_as_of is look-ahead — fatal for historical/as-of runs.
+    actual_oldest = min(row_stamps) if row_stamps else None
+    actual_newest = max(row_stamps) if row_stamps else None
+    staleness_ok = actual_oldest is not None and actual_oldest >= screening_as_of - timedelta(
+        days=float(max_staleness_days)
+    )
+    no_future_retrievals = actual_newest is not None and actual_newest <= (
+        screening_as_of + timedelta(seconds=float(clock_skew_seconds))
+    )
     verified = not problems
     return {
         **status,
         "screening_as_of": screening_as_of.astimezone(timezone.utc).isoformat(),
         "max_staleness_days": float(max_staleness_days),
+        "clock_skew_seconds": float(clock_skew_seconds),
+        "verified_oldest_retrieved_at": actual_oldest.isoformat() if actual_oldest else None,
+        "verified_newest_retrieved_at": actual_newest.isoformat() if actual_newest else None,
         "staleness_ok": staleness_ok,
+        "no_future_retrievals": no_future_retrievals,
         "problem_count": len(problems),
         "problems": problems[:50],
         "contents_verified": verified,
-        "ready_for_screening": verified and bool(status.get("collection_ready")) and staleness_ok,
+        "ready_for_screening": (
+            verified
+            and bool(status.get("collection_ready"))
+            and staleness_ok
+            and no_future_retrievals
+        ),
     }
