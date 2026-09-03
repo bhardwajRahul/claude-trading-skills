@@ -280,6 +280,7 @@ Both commands must exit `0`. Present the self-contained ZIP together with the re
 - `skills/us-undervalued-growth-screener/references/checkpointing.md`
 - `skills/us-undervalued-growth-screener/references/claude-code-execution.md`
 - `skills/us-undervalued-growth-screener/references/data-contract.md`
+- `skills/us-undervalued-growth-screener/references/full-universe-snapshot.md`
 - `skills/us-undervalued-growth-screener/references/methodology-ja.md`
 - `skills/us-undervalued-growth-screener/references/methodology.md`
 - `skills/us-undervalued-growth-screener/references/migration-v1-to-v2.md`
@@ -303,6 +304,8 @@ Both commands must exit `0`. Present the self-contained ZIP together with the re
 - `skills/us-undervalued-growth-screener/scripts/build_discovery_pool.py`
 - `skills/us-undervalued-growth-screener/scripts/build_provider_prefilter_pool.py`
 - `skills/us-undervalued-growth-screener/scripts/bundle_run_artifacts.py`
+- `skills/us-undervalued-growth-screener/scripts/coverage_semantics.py`
+- `skills/us-undervalued-growth-screener/scripts/estimate_snapshot.py`
 - `skills/us-undervalued-growth-screener/scripts/evaluate_candidates.py`
 - `skills/us-undervalued-growth-screener/scripts/fmp_client.py`
 - `skills/us-undervalued-growth-screener/scripts/manage_run_state.py`
