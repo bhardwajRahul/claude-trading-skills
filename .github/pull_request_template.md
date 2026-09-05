@@ -34,7 +34,8 @@ Mark non-applicable items as N/A and explain them under reviewer notes. / 非該
 - [ ] Skill docs passed `python3 scripts/generate_skill_docs.py --check`. / skill文書のdriftを確認しました。
 - [ ] Workflow docs passed `python3 scripts/generate_workflow_docs.py --check`. / workflow文書のdriftを確認しました。
 - [ ] Skillset docs passed `python3 scripts/generate_skillset_docs.py --check`. / skillset文書のdriftを確認しました。
-- [ ] README/catalog output passed `python3 scripts/generate_catalog_from_index.py --check`. / catalogのdriftを確認しました。
+- [ ] README/CLAUDE catalog output passed `python3 scripts/generate_catalog_from_index.py --check`. / README・CLAUDE catalogのdriftを確認しました。
+- [ ] Website EN/JA skill catalogs passed `python3 scripts/check_skill_catalog.py`. / Webサイト英日skill catalogのcanonical dataを確認しました。
 - [ ] Navigator snapshot passed `python3 skills/trading-skills-navigator/scripts/build_snapshot.py --check`. / navigator snapshotを確認しました。
 - [ ] Vendored FMP clients passed `python3 scripts/generate_fmp_client.py --check`. / FMP clientのdriftを確認しました。
 - [ ] Changed skill packages passed `python3 scripts/check_package_drift_for_changed_skills.py`. / 変更skillのpackage driftを確認しました。

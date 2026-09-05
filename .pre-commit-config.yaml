@@ -122,6 +122,15 @@ repos:
         files: '^(skills-index\.yaml|scripts/generate_catalog_from_index\.py|README\.md|README\.ja\.md|CLAUDE\.md)$'
         pass_filenames: false
 
+      - id: website-skill-catalog-check
+        name: Website EN/JA skill catalog canonical-data check
+        entry: python3 scripts/check_skill_catalog.py
+        language: system
+        # Website descriptions remain localized and hand-written. Validate
+        # identity, completeness, counts, and paid-API fields against the index.
+        files: '^(skills-index\.yaml|scripts/check_skill_catalog\.py|scripts/tests/test_check_skill_catalog\.py|docs/(en|ja)/skill-catalog\.md)$'
+        pass_filenames: false
+
       - id: snapshot-check
         name: Navigator metadata snapshot drift check (regenerate from SSoT)
         entry: python3 skills/trading-skills-navigator/scripts/build_snapshot.py --check
