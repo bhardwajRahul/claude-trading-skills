@@ -939,7 +939,8 @@ Scripts should:
 - Check for API keys before making requests
 - Validate date ranges and input parameters
 - Provide helpful error messages to stderr
-- Return proper exit codes (0 for success, 1 for errors)
+- Return proper exit codes (0 for success, 1 for errors, 2 for missing
+  runtime dependencies with an actionable message pointing at requirements.txt)
 - Support retry logic with exponential backoff for rate limits
 
 ### No Personal Information in Committed Files
@@ -976,6 +977,24 @@ When skills are ready for distribution:
 5. Commit changes with descriptive message
 
 ZIP packages allow Claude web app users to upload and use skills without cloning the repository.
+
+**Runtime Dependency Declaration (issue #330):**
+
+Every skill with executable Python (`skills/<id>/scripts/*.py` outside `tests/`)
+must ship `skills/<id>/requirements.txt`:
+
+- List every third-party package the packaged scripts import (use
+  `opencv-python-headless`, never `opencv-python`, for CI compatibility).
+- Skills using only the standard library contain a `# stdlib-only` marker line.
+- Requirement-line grammar: `<PEP 508 requirement>` with an optional trailing
+  `# optional: <reason>` marker. Direct URL references and environment markers
+  (`;`) are rejected. An `optional` entry must be imported only inside
+  `try/except ImportError` with a degraded path plus an absence test.
+- Verify with `python3 scripts/check_skill_deps.py check` (offline, fail-closed)
+  and `python3 scripts/check_skill_deps.py smoke --skill <skill-id>`.
+  `package_skills.py` refuses to package an executable skill without the manifest.
+- New skills: copy the `requirements.txt` convention from an existing skill with
+  similar imports; the skill-creator flow must include this file before packaging.
 
 ⚠️ **API Key Requirements in Distribution:**
 - When distributing skills that require API keys, clearly document the requirements in the skill's SKILL.md

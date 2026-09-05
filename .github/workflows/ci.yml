@@ -125,7 +125,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install minimal deps
-        run: pip install pyyaml
+        run: pip install pyyaml "packaging>=24.0"
 
       # 1. Validate skills-index.yaml structure + bijection with skills/.
       # Default mode is what pre-commit runs on each commit.
@@ -195,6 +195,16 @@ jobs:
 
       - name: FMP skill package drift check
         run: python3 scripts/package_skills.py --check --skill pead-screener --skill earnings-trade-analyzer --skill ibd-distribution-day-monitor --skill vcp-screener --skill parabolic-short-trade-planner --skill ftd-detector --skill canslim-screener --skill macro-regime-detector --skill market-top-detector
+
+      # 5b. Dependency declaration check (offline, issue #330): every
+      # executable skill must ship requirements.txt covering its imports.
+      - name: Skill dependency declaration check
+        run: python3 scripts/check_skill_deps.py check
+
+      # 5c. Packaged dependency smoke (offline, issue #330): the committed
+      # .skill carries byte-identical requirements.txt and compilable scripts.
+      - name: Packaged dependency smoke
+        run: python3 scripts/check_skill_deps.py smoke --skill macro-regime-detector
 
       # Note: the validator + generator unit tests already run under the
       # 'Test repo-level scripts' step in the test job above.
