@@ -17,9 +17,14 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.6
     hooks:
+      # The FMP client templates carry a python3 shebang. On Windows, where
+      # every file counts as executable, pre-commit reads it and tags them as
+      # Python, but their @@...@@ placeholders are not valid Python.
       - id: ruff
         args: [--fix]
+        exclude: '\.tmpl$'
       - id: ruff-format
+        exclude: '\.tmpl$'
 
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.1
